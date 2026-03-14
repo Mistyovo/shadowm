@@ -34,3 +34,14 @@ pip-wheel-metadata/
 ehthumbs.db
 Thumbs.db
 desktop.ini
+# Project specific
+build_env/
+
+# Build tools and downloads
+upx/
+*.zip
+*.rar
+*.7z
+
+# Logs
+*.log
