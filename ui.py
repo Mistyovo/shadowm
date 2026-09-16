@@ -2,6 +2,7 @@ import sys
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
+    QCheckBox,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -15,10 +16,11 @@ from capture_hider import WindowCaptureHider
 class HideWorker(QThread):
     finished = pyqtSignal(object, bool, bool, str)
 
-    def __init__(self, hwnd, is_checked):
+    def __init__(self, hwnd, is_checked, auto=False):
         super().__init__()
         self.hwnd = hwnd
         self.is_checked = is_checked
+        self.auto = auto
 
     def run(self):
         success, msg = WindowCaptureHider.set_window_hidden(
@@ -44,6 +46,12 @@ class WindowHiderUI(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        self.auto_hide_checkbox = QCheckBox("Hide newly detected windows by default")
+        self.auto_hide_checkbox.setToolTip(
+            "When checked, every window that appears in the list below is "
+            "automatically hidden from screen capture."
+        )
+        layout.addWidget(self.auto_hide_checkbox)
         layout.addWidget(
             QLabel("Check the windows below to hide them from screen capture:")
         )
@@ -90,6 +98,7 @@ class WindowHiderUI(QWidget):
 
     def _add_new_items(self, new_hwnds: dict):
         """Creates new list items for recently discovered windows."""
+        hide_by_default = self.auto_hide_checkbox.isChecked()
         for hwnd, win_info in new_hwnds.items():
             item = QListWidgetItem(win_info["title"])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
@@ -98,7 +107,9 @@ class WindowHiderUI(QWidget):
                 item.setCheckState(Qt.Checked)
                 WindowCaptureHider.set_window_hidden(hwnd, True)
             else:
-                item.setCheckState(Qt.Unchecked)
+                item.setCheckState(Qt.Checked if hide_by_default else Qt.Unchecked)
+                if hide_by_default:
+                    self._start_hide_worker(hwnd, True, auto=True)
                 
             item.setData(Qt.UserRole, hwnd)
             
@@ -118,6 +129,16 @@ class WindowHiderUI(QWidget):
                 return item
         return None
 
+    def _start_hide_worker(self, hwnd, is_checked, auto=False):
+        """Starts an async hide operation; returns False if one is already running."""
+        if hwnd in self.workers:
+            return False
+        worker = HideWorker(hwnd, is_checked, auto=auto)
+        worker.finished.connect(self.on_hide_finished)
+        self.workers[hwnd] = worker
+        worker.start()
+        return True
+
     def _revert_item_state(self, item: QListWidgetItem, is_checked: bool):
         """Silently reverts a checkbox state without triggering logic signals."""
         self._is_updating = True
@@ -136,22 +157,19 @@ class WindowHiderUI(QWidget):
         hwnd = item.data(Qt.UserRole)
         is_checked = item.checkState() == Qt.Checked
 
-        if hwnd in self.workers:
+        if not self._start_hide_worker(hwnd, is_checked):
             self._revert_item_state(item, is_checked)
-            return
-
-        worker = HideWorker(hwnd, is_checked)
-        worker.finished.connect(self.on_hide_finished)
-        self.workers[hwnd] = worker
-        worker.start()
 
     def on_hide_finished(self, hwnd, is_checked, success, msg):
         worker = self.workers.pop(hwnd, None)
+        auto = False
         if worker is not None:
+            auto = worker.auto
             worker.deleteLater()
 
         if not success:
             item = self._get_item_by_hwnd(hwnd)
             if item:
                 self._revert_item_state(item, is_checked)
-                QMessageBox.warning(self, "Operation Failed", msg)
+                if not auto:
+                    QMessageBox.warning(self, "Operation Failed", msg)

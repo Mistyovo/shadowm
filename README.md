@@ -9,6 +9,7 @@ It uses the native Windows API (`SetWindowDisplayAffinity`) to tag windows as `W
 - Asynchronous application hiding with zero UI blocking/freezes
 - Extracts native application `.exe` icons
 - Double-click toggling
+- Optional switch to auto-hide newly detected windows by default
 - Pure memory bypass (no DLLs written to disk)
 
 ## Requirements
