@@ -89,11 +89,11 @@ class WindowHiderUI(QWidget):
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(QLabel("Opacity:"))
         self.opacity_slider = QSlider(Qt.Horizontal)
-        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setRange(1, 100)
         self.opacity_slider.setValue(100)
         self.opacity_slider.setEnabled(False)
         self.opacity_slider.setToolTip(
-            "On-screen transparency (10%-100%) of the selected window. This "
+            "On-screen transparency (1%-100%) of the selected window. This "
             "is a local visual effect only - whether the window is excluded "
             "from capture is controlled by its checkbox above."
         )
