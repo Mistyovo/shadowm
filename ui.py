@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QFileInfo
 from capture_hider import WindowCaptureHider
+from ime_hider import ImeGuard
 
 
 class HideWorker(QThread):
@@ -35,7 +36,11 @@ class WindowHiderUI(QWidget):
         self._is_updating = False
         self.workers = {}
         self.icon_provider = QFileIconProvider()
-        
+
+        self.ime_guard = ImeGuard(self)
+        self.ime_guard.active_changed.connect(self.on_ime_guard_active)
+        self.ime_guard.error_occurred.connect(self.on_ime_guard_error)
+
         self._init_window()
         self._setup_ui()
         self._setup_timer()
@@ -52,6 +57,22 @@ class WindowHiderUI(QWidget):
             "automatically hidden from screen capture."
         )
         layout.addWidget(self.auto_hide_checkbox)
+
+        self.ime_guard_checkbox = QCheckBox(
+            "Also hide the IME candidate box while typing in hidden windows"
+        )
+        self.ime_guard_checkbox.setChecked(True)
+        self.ime_guard_checkbox.setToolTip(
+            "The candidate box of the built-in Windows IME is drawn by a "
+            "separate system process (TextInputHost.exe / ChsIME.exe), so it "
+            "stays visible to capture tools even when the target window is "
+            "hidden. While the focused window is hidden, those IME windows "
+            "are excluded from capture too, and restored once focus returns "
+            "to a normal window."
+        )
+        self.ime_guard_checkbox.toggled.connect(self.ime_guard.set_enabled)
+        layout.addWidget(self.ime_guard_checkbox)
+
         layout.addWidget(
             QLabel("Check the windows below to hide them from screen capture:")
         )
@@ -61,15 +82,23 @@ class WindowHiderUI(QWidget):
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         layout.addWidget(self.list_widget)
 
+        self.ime_status_label = QLabel("")
+        self.ime_status_label.setWordWrap(True)
+        layout.addWidget(self.ime_status_label)
+
     def _setup_timer(self):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_window_list)
+        self.timer.timeout.connect(self.ime_guard.refresh)
+        self.ime_guard.refresh()
         self.update_window_list()
         self.timer.start(1500)
 
     def showEvent(self, event):
         super().showEvent(event)
-        WindowCaptureHider.set_window_hidden(int(self.winId()), True)
+        own_hwnd = int(self.winId())
+        WindowCaptureHider.set_window_hidden(own_hwnd, True)
+        self.ime_guard.note_window_state(own_hwnd, True, True)
         self.update_window_list()
 
     def update_window_list(self):
@@ -90,6 +119,7 @@ class WindowHiderUI(QWidget):
             
             if hwnd not in current_hwnds:
                 self.list_widget.takeItem(i)
+                self.ime_guard.forget(hwnd)
             else:
                 expected_text = current_hwnds[hwnd]["title"]
                 if item.text() != expected_text:
@@ -106,6 +136,7 @@ class WindowHiderUI(QWidget):
             if hwnd == int(self.winId()):
                 item.setCheckState(Qt.Checked)
                 WindowCaptureHider.set_window_hidden(hwnd, True)
+                self.ime_guard.note_window_state(hwnd, True, True)
             else:
                 item.setCheckState(Qt.Checked if hide_by_default else Qt.Unchecked)
                 if hide_by_default:
@@ -167,9 +198,27 @@ class WindowHiderUI(QWidget):
             auto = worker.auto
             worker.deleteLater()
 
+        self.ime_guard.note_window_state(hwnd, is_checked, success)
+
         if not success:
             item = self._get_item_by_hwnd(hwnd)
             if item:
                 self._revert_item_state(item, is_checked)
                 if not auto:
                     QMessageBox.warning(self, "Operation Failed", msg)
+
+    def closeEvent(self, event):
+        self.ime_guard.shutdown()
+        super().closeEvent(event)
+
+    def on_ime_guard_active(self, active):
+        self.ime_status_label.setText(
+            "IME candidate box is now excluded from capture."
+            if active
+            else ""
+        )
+
+    def on_ime_guard_error(self, msg):
+        self.ime_status_label.setText(
+            f"IME candidate protection failed: {msg}"
+        )
