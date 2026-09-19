@@ -12,6 +12,7 @@ It uses the native Windows API (`SetWindowDisplayAffinity`) to tag windows as `W
 - Optional switch to auto-hide newly detected windows by default
 - IME candidate protection: while typing in a hidden window, IME candidate bars (Sogou Pinyin `SoPY_*` windows, classic IME hosts) are excluded from capture too
 - Per-window on-screen opacity: make any listed window translucent locally while it stays excluded from capture
+- Exit confirmation dialog (itself excluded from capture) to prevent accidental closure
 - Pure memory bypass (no DLLs written to disk)
 
 ## Requirements

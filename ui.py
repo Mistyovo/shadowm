@@ -33,6 +33,18 @@ class HideWorker(QThread):
         self.finished.emit(self.hwnd, self.is_checked, success, msg)
 
 
+class CaptureSafeMessageBox(QMessageBox):
+    """Message box that is itself excluded from screen capture.
+
+    The affinity is set synchronously in showEvent, i.e. before the dialog
+    paints its first frame, so it never leaks into a capture.
+    """
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        WindowCaptureHider.set_window_hidden(int(self.winId()), True)
+
+
 class WindowHiderUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -230,9 +242,27 @@ class WindowHiderUI(QWidget):
                     QMessageBox.warning(self, "Operation Failed", msg)
 
     def closeEvent(self, event):
+        if not self._confirm_exit():
+            event.ignore()
+            return
         WindowOpacity.restore_all()
         self.ime_guard.shutdown()
         super().closeEvent(event)
+
+    def _confirm_exit(self) -> bool:
+        """Asks before quitting so ShadowM is not closed by accident."""
+        box = CaptureSafeMessageBox(self)
+        box.setWindowTitle("ShadowM")
+        box.setIcon(QMessageBox.Question)
+        box.setText("Quit ShadowM?")
+        box.setInformativeText(
+            "All capture-hidden windows will be restored and IME candidate "
+            "protection will be lifted. Keep ShadowM running to stay "
+            "protected."
+        )
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        return box.exec_() == QMessageBox.Yes
 
     def on_current_item_changed(self, current, _previous):
         """Syncs the opacity slider with the newly selected window."""
