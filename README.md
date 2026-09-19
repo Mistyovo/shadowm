@@ -11,6 +11,7 @@ It uses the native Windows API (`SetWindowDisplayAffinity`) to tag windows as `W
 - Double-click toggling
 - Optional switch to auto-hide newly detected windows by default
 - IME candidate protection: while typing pinyin in a hidden window with the built-in Microsoft IME, the candidate box is excluded from capture too
+- Per-window on-screen opacity: make any listed window translucent locally while it stays excluded from capture
 - Pure memory bypass (no DLLs written to disk)
 
 ## Requirements
@@ -47,6 +48,16 @@ Notes:
 - Requires the same privileges as regular window hiding (Administrator, 64-bit).
 - Only the built-in Microsoft input experience is covered; third-party IMEs (Sogou, Baidu, ...) draw their candidate windows from their own processes and are not targeted.
 - If ShadowM is killed abruptly while typing in a hidden window, the IME windows can stay excluded from capture. Simply start ShadowM again - it restores leftover state on launch - or toggle the IME checkbox off and back on.
+
+## Window Opacity
+The "Opacity" slider adjusts how transparent the selected window looks **on your screen** via `WS_EX_LAYERED` + `SetLayeredWindowAttributes` (these calls work on other processes' windows directly, no injection needed).
+
+It is purely a local visual effect and independent of capture exclusion:
+
+- A window excluded from capture stays excluded no matter how translucent you make it - recordings keep showing the excluded (black/empty) region.
+- A window that is *not* excluded will simply show up translucent in recordings, since captures reflect what the screen looks like.
+
+Moving the slider back to 100% fully restores the window (the layered style is removed again; windows that were already layered before only get their alpha reset). All opacities are restored automatically when ShadowM exits normally.
 
 ## Disclaimer
 This tool uses techniques typically employed by debugging and reverse engineering software (Read/Write Process Memory). Some aggressive Antivirus solutions might falsely flag the `CreateRemoteThread` action.

@@ -2,16 +2,19 @@ import sys
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QCheckBox,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QSlider,
     QFileIconProvider,
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QFileInfo
 from capture_hider import WindowCaptureHider
 from ime_hider import ImeGuard
+from window_opacity import WindowOpacity
 
 
 class HideWorker(QThread):
@@ -34,6 +37,7 @@ class WindowHiderUI(QWidget):
     def __init__(self):
         super().__init__()
         self._is_updating = False
+        self._is_syncing_opacity = False
         self.workers = {}
         self.icon_provider = QFileIconProvider()
 
@@ -80,11 +84,29 @@ class WindowHiderUI(QWidget):
         self.list_widget = QListWidget()
         self.list_widget.itemChanged.connect(self.on_item_changed)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.list_widget.currentItemChanged.connect(self.on_current_item_changed)
         layout.addWidget(self.list_widget)
 
-        self.ime_status_label = QLabel("")
-        self.ime_status_label.setWordWrap(True)
-        layout.addWidget(self.ime_status_label)
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("Opacity:"))
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setEnabled(False)
+        self.opacity_slider.setToolTip(
+            "On-screen transparency (10%-100%) of the selected window. This "
+            "is a local visual effect only - whether the window is excluded "
+            "from capture is controlled by its checkbox above."
+        )
+        self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
+        opacity_row.addWidget(self.opacity_slider)
+        self.opacity_value_label = QLabel("100%")
+        opacity_row.addWidget(self.opacity_value_label)
+        layout.addLayout(opacity_row)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
 
     def _setup_timer(self):
         self.timer = QTimer(self)
@@ -119,6 +141,7 @@ class WindowHiderUI(QWidget):
             
             if hwnd not in current_hwnds:
                 self.list_widget.takeItem(i)
+                WindowOpacity.restore(hwnd)
                 self.ime_guard.forget(hwnd)
             else:
                 expected_text = current_hwnds[hwnd]["title"]
@@ -208,17 +231,45 @@ class WindowHiderUI(QWidget):
                     QMessageBox.warning(self, "Operation Failed", msg)
 
     def closeEvent(self, event):
+        WindowOpacity.restore_all()
         self.ime_guard.shutdown()
         super().closeEvent(event)
 
+    def on_current_item_changed(self, current, _previous):
+        """Syncs the opacity slider with the newly selected window."""
+        if current is None:
+            self.opacity_slider.setEnabled(False)
+            return
+        hwnd = current.data(Qt.UserRole)
+        self.opacity_slider.setEnabled(True)
+        self._is_syncing_opacity = True
+        self.opacity_slider.setValue(WindowOpacity.get_percent(hwnd))
+        self.opacity_value_label.setText(f"{self.opacity_slider.value()}%")
+        self._is_syncing_opacity = False
+
+    def on_opacity_changed(self, value):
+        self.opacity_value_label.setText(f"{value}%")
+        if self._is_syncing_opacity:
+            return
+        item = self.list_widget.currentItem()
+        if item is None:
+            return
+        hwnd = item.data(Qt.UserRole)
+        if value >= 100:
+            success, msg = WindowOpacity.restore(hwnd)
+        else:
+            success, msg = WindowOpacity.set_opacity(hwnd, value)
+        if not success:
+            self.status_label.setText(f"Opacity change failed: {msg}")
+
     def on_ime_guard_active(self, active):
-        self.ime_status_label.setText(
+        self.status_label.setText(
             "IME candidate box is now excluded from capture."
             if active
             else ""
         )
 
     def on_ime_guard_error(self, msg):
-        self.ime_status_label.setText(
+        self.status_label.setText(
             f"IME candidate protection failed: {msg}"
         )
