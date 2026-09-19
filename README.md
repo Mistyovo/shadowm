@@ -13,6 +13,7 @@ It uses the native Windows API (`SetWindowDisplayAffinity`) to tag windows as `W
 - IME candidate protection: while typing in a hidden window, IME candidate bars (Sogou Pinyin `SoPY_*` windows, classic IME hosts) are excluded from capture too
 - Per-window on-screen opacity: make any listed window translucent locally while it stays excluded from capture
 - Exit confirmation dialog (itself excluded from capture) to prevent accidental closure
+- Remembered hidden windows: applications closed while hidden are re-hidden automatically on next launch
 - Pure memory bypass (no DLLs written to disk)
 
 ## Requirements
@@ -47,6 +48,13 @@ Notes:
 - Requires the same privileges as regular window hiding (Administrator, 64-bit).
 - In-process IME windows are caught by hooks installed on each hidden window's own process, so protection follows whichever app you are typing into.
 - If ShadowM is killed abruptly while typing in a hidden window, an armed candidate window can stay excluded from capture. Start ShadowM again - it restores leftover state on launch - or toggle the IME checkbox off and back on.
+
+## Remembered Hidden Windows
+When a window you explicitly hid is closed, ShadowM remembers its application (identified by the executable path) in `remembered_hidden.json`. The next time that application opens a window, ShadowM hides it from capture automatically - you do not have to check it again.
+
+- Only windows *you* checked are remembered; windows hidden merely by the global "hide newly detected windows" toggle are not, so flipping that toggle leaves no lasting rules.
+- Unchecking a remembered window removes its rule ("unhide" means "stop remembering").
+- Rules are per application: if an executable shows several windows, every new window of it is hidden. `remembered_hidden.json` can be edited by hand to clear rules.
 
 ## Window Opacity
 The "Opacity" slider adjusts how transparent the selected window looks **on your screen** via `WS_EX_LAYERED` + `SetLayeredWindowAttributes` (these calls work on other processes' windows directly, no injection needed).

@@ -1,4 +1,7 @@
+import json
+import os
 import sys
+import time
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -53,6 +56,11 @@ class WindowHiderUI(QWidget):
         self.workers = {}
         self.icon_provider = QFileIconProvider()
 
+        self._remembered_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "remembered_hidden.json"
+        )
+        self._remembered = self._load_remembered()
+
         self.ime_guard = ImeGuard(self)
         self.ime_guard.active_changed.connect(self.on_ime_guard_active)
         self.ime_guard.error_occurred.connect(self.on_ime_guard_error)
@@ -60,6 +68,39 @@ class WindowHiderUI(QWidget):
         self._init_window()
         self._setup_ui()
         self._setup_timer()
+
+    # ---- remembered hidden windows -----------------------------------------
+
+    def _load_remembered(self) -> dict:
+        """Loads the exe paths of windows that were hidden when closed."""
+        try:
+            with open(self._remembered_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    def _save_remembered(self):
+        try:
+            with open(self._remembered_file, "w", encoding="utf-8") as f:
+                json.dump(self._remembered, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _remember_window(self, exe_path, title):
+        """Records an application so its windows auto-hide on next launch."""
+        if not exe_path:
+            return
+        self._remembered[exe_path] = {"title": title, "ts": time.time()}
+        self._save_remembered()
+
+    def _forget_window(self, exe_path):
+        """Drops the auto-hide rule (user unchecked a remembered window)."""
+        if exe_path and exe_path in self._remembered:
+            del self._remembered[exe_path]
+            self._save_remembered()
 
     def _init_window(self):
         self.setWindowTitle("ShadowM - Screen Capture Hider")
@@ -149,8 +190,15 @@ class WindowHiderUI(QWidget):
         for i in range(self.list_widget.count() - 1, -1, -1):
             item = self.list_widget.item(i)
             hwnd = item.data(Qt.UserRole)
-            
+
             if hwnd not in current_hwnds:
+                if (
+                    item.checkState() == Qt.Checked
+                    and hwnd != int(self.winId())
+                    and item.data(Qt.UserRole + 2)
+                ):
+                    # closed while the user had it hidden: remember for relaunch
+                    self._remember_window(item.data(Qt.UserRole + 1), item.text())
                 self.list_widget.takeItem(i)
                 WindowOpacity.restore(hwnd)
                 self.ime_guard.forget(hwnd)
@@ -166,24 +214,32 @@ class WindowHiderUI(QWidget):
         for hwnd, win_info in new_hwnds.items():
             item = QListWidgetItem(win_info["title"])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            
+
+            exe_path = win_info.get("exe_path", "")
             if hwnd == int(self.winId()):
                 item.setCheckState(Qt.Checked)
                 WindowCaptureHider.set_window_hidden(hwnd, True)
                 self.ime_guard.note_window_state(hwnd, True, True)
+            elif exe_path and exe_path in self._remembered:
+                # this application was hidden when it was last closed
+                item.setCheckState(Qt.Checked)
+                self._start_hide_worker(hwnd, True, auto=True)
+                self.status_label.setText(
+                    f"Auto-hidden (remembered): {os.path.basename(exe_path)}"
+                )
             else:
                 item.setCheckState(Qt.Checked if hide_by_default else Qt.Unchecked)
                 if hide_by_default:
                     self._start_hide_worker(hwnd, True, auto=True)
-                
+
             item.setData(Qt.UserRole, hwnd)
-            
-            exe_path = win_info.get("exe_path")
+            item.setData(Qt.UserRole + 1, exe_path)
+
             if exe_path:
                 icon = self.icon_provider.icon(QFileInfo(exe_path))
                 if not icon.isNull():
                     item.setIcon(icon)
-            
+
             self.list_widget.addItem(item)
 
     def _get_item_by_hwnd(self, hwnd) -> QListWidgetItem:
@@ -221,6 +277,11 @@ class WindowHiderUI(QWidget):
 
         hwnd = item.data(Qt.UserRole)
         is_checked = item.checkState() == Qt.Checked
+        if is_checked:
+            # setData re-emits itemChanged; suppress the re-entry
+            self._is_updating = True
+            item.setData(Qt.UserRole + 2, True)  # hidden by the user explicitly
+            self._is_updating = False
 
         if not self._start_hide_worker(hwnd, is_checked):
             self._revert_item_state(item, is_checked)
@@ -233,6 +294,12 @@ class WindowHiderUI(QWidget):
             worker.deleteLater()
 
         self.ime_guard.note_window_state(hwnd, is_checked, success)
+
+        if success and not is_checked:
+            # unchecking a remembered window drops its auto-hide rule
+            item = self._get_item_by_hwnd(hwnd)
+            if item is not None:
+                self._forget_window(item.data(Qt.UserRole + 1))
 
         if not success:
             item = self._get_item_by_hwnd(hwnd)

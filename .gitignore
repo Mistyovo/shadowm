@@ -36,6 +36,7 @@ Thumbs.db
 desktop.ini
 # Project specific
 build_env/
+remembered_hidden.json
 
 # Build tools and downloads
 upx/
