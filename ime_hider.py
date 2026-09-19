@@ -1,18 +1,25 @@
 """
-Guards the built-in Windows IME candidate box from screen capture.
+Hides IME candidate windows from screen capture while the user types inside a
+window ShadowM has already hidden.
 
-The pinyin candidate/composition UI of the Microsoft IME is not drawn by the
-application being typed into - it lives in a separate system input process
-(TextInputHost.exe on Windows 10 1903+/Windows 11, ChsIME.exe on older
-builds). Hiding an application window therefore leaves the candidate box
-visible to capture tools.
+Two input-method families are handled:
 
-ImeGuard watches the foreground window: while focus is inside a window that
-ShadowM has hidden, every top-level window of the input host process is
-tagged WDA_EXCLUDEFROMCAPTURE (through the same remote-thread injection used
-for normal windows), and WinEvent hooks arm any window the host creates or
-shows later (e.g. a freshly created candidate window). When focus returns to
-a normal window, the IME windows are restored to WDA_NONE.
+1. In-process IMEs like Sogou Pinyin: their UI (composition bar, candidate
+   list, status bar) is rendered by the *focused application's own process*
+   as normal top-level windows ("SoPY_*" classes). SetWindowDisplayAffinity
+   works on them, so they are simply tagged WDA_EXCLUDEFROMCAPTURE via the
+   usual remote-thread injection - locally unchanged, invisible to capture.
+
+2. Out-of-process IME hosts (ChsIME.exe, ctfmon.exe, TextInputHost.exe for
+   the legacy surfaces): their top-level windows are tagged the same way as
+   a best effort. Note the *modern* Microsoft Pinyin candidate popup
+   (a DirectComposition CoreWindow child) ignores display affinity entirely,
+   so it cannot be protected by this mechanism.
+
+Engagement rules: while the foreground window is one ShadowM has hidden,
+every tracked IME window is armed (and any new one that appears is armed
+within milliseconds via WinEvent hooks). When focus returns to a normal
+window, everything is restored to WDA_NONE.
 """
 
 import ctypes
@@ -22,13 +29,18 @@ from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
 from capture_hider import WindowCaptureHider, EnumWindowsProc, k32, u32
 
-# Processes hosting the UI of the Windows built-in input methods.
+# Processes hosting out-of-process IME UI.
 IME_HOST_PROCESS_NAMES = {
-    "textinputhost.exe",  # Windows 10 1903+ / Windows 11 "Windows Input Experience"
+    "textinputhost.exe",  # Windows 10 1903+ / Windows 11 input experience
     "chsime.exe",         # Windows 8.x / early Windows 10 simplified Chinese IME
     "chtime.exe",         # traditional Chinese IME host
     "ctfmon.exe",         # legacy CTF monitor (language bar / old-style IME UI)
 }
+
+# Window class prefixes of in-process IME UI windows (rendered by the focused
+# application itself). Verified against Sogou Pinyin: SoPY_Comp (composition +
+# candidate bar), SoPY_Status, SoPY_Hint, SoPY_UI.
+IME_CLASS_PREFIXES = ("SoPY",)
 
 TH32CS_SNAPPROCESS = 0x00000002
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -37,6 +49,7 @@ EVENT_SYSTEM_FOREGROUND = 0x0003
 EVENT_OBJECT_CREATE = 0x8000
 EVENT_OBJECT_DESTROY = 0x8001
 EVENT_OBJECT_SHOW = 0x8002
+EVENT_OBJECT_HIDE = 0x8003
 OBJID_WINDOW = 0
 GA_ROOT = 2
 WINEVENT_OUTOFCONTEXT = 0x0000
@@ -69,6 +82,8 @@ u32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 u32.GetClassNameW.restype = ctypes.c_int
 u32.IsWindow.argtypes = [wintypes.HWND]
 u32.IsWindow.restype = wintypes.BOOL
+u32.IsWindowVisible.argtypes = [wintypes.HWND]
+u32.IsWindowVisible.restype = wintypes.BOOL
 u32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 u32.GetAncestor.restype = wintypes.HWND
 
@@ -98,7 +113,7 @@ u32.UnhookWinEvent.restype = wintypes.BOOL
 
 
 def find_ime_pids():
-    """Returns the pids of every running process that hosts built-in IME UI."""
+    """Returns the pids of every running out-of-process IME host."""
     pids = set()
     snapshot = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if not snapshot or snapshot == INVALID_HANDLE_VALUE:
@@ -116,17 +131,24 @@ def find_ime_pids():
     return pids
 
 
+def is_ime_class(class_name):
+    return any(class_name.startswith(prefix) for prefix in IME_CLASS_PREFIXES)
+
+
 def find_ime_windows(pids):
-    """Returns {hwnd: class_name} for all top-level windows owned by pids."""
+    """Returns {hwnd: class_name} for top-level IME windows:
+    windows owned by an IME host process, or windows whose class marks them
+    as in-process IME UI (e.g. Sogou's SoPY_*, whatever process owns them)."""
     windows = {}
 
     def enum_proc(hwnd, _lparam):
         pid = wintypes.DWORD()
         u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value in pids:
-            class_buf = ctypes.create_unicode_buffer(64)
-            u32.GetClassNameW(hwnd, class_buf, 64)
-            windows[hwnd] = class_buf.value
+        class_buf = ctypes.create_unicode_buffer(64)
+        u32.GetClassNameW(hwnd, class_buf, 64)
+        class_name = class_buf.value
+        if pid.value in pids or is_ime_class(class_name):
+            windows[hwnd] = class_name
         return True
 
     callback = EnumWindowsProc(enum_proc)
@@ -150,8 +172,8 @@ class _ImeWorker(QThread):
 
 
 class ImeGuard(QObject):
-    """Excludes the built-in IME candidate windows from screen capture while
-    the keyboard focus is inside a window ShadowM has already hidden."""
+    """Excludes IME candidate windows from screen capture while the keyboard
+    focus is inside a window ShadowM has already hidden."""
 
     active_changed = pyqtSignal(bool)
     error_occurred = pyqtSignal(str)
@@ -160,7 +182,7 @@ class ImeGuard(QObject):
         super().__init__(parent)
         self.enabled = True
         self._hidden_hwnds = set()   # windows ShadowM currently hides
-        self._ime_pids = set()
+        self._ime_pids = set()       # out-of-process IME host pids
         self._ime_windows = {}       # hwnd -> class name
         self._applied = {}           # hwnd -> affinity state we last applied
         self._desired = False        # True while candidates must be excluded
@@ -170,8 +192,11 @@ class ImeGuard(QObject):
         self._healed = False
         self._foreground_hook = None
         self._foreground_proc = None
-        self._object_hooks = []
-        self._object_hook_procs = []
+        self._host_hooks = []        # hooks filtered by IME host pids
+        self._host_hook_procs = []
+        self._app_hook_pids = set()  # pids of hidden windows already hooked
+        self._app_hooks = []         # hooks filtered by hidden-app pids
+        self._app_hook_procs = []
         self._install_foreground_hook()
 
     # ---- public API ------------------------------------------------------
@@ -187,7 +212,7 @@ class ImeGuard(QObject):
             if self._desired:
                 self._desired = False
                 self.active_changed.emit(False)
-            self._remove_object_hooks()
+            self._remove_all_hooks()
             for hwnd in list(self._ime_windows):
                 self._apply(hwnd, False, force=True)
 
@@ -214,11 +239,11 @@ class ImeGuard(QObject):
         if pids != self._ime_pids:
             self._ime_pids = pids
             self._failed.clear()
-            if self._object_hooks:
-                self._remove_object_hooks()
+            if self._host_hooks:
+                self._remove_host_hooks()
         self._ime_windows = find_ime_windows(self._ime_pids)
         self._prune_dead_windows()
-        self._update_object_hooks()
+        self._update_hooks()
         if not self._healed:
             # Restore anything a previous run left excluded (e.g. after a crash
             # or Task Manager kill while typing in a hidden window).
@@ -239,14 +264,13 @@ class ImeGuard(QObject):
             self._desired = want
             self._failed.clear()
             self.active_changed.emit(want)
-        self._update_object_hooks()
+        self._update_hooks()
         self._apply_desired()
 
     def shutdown(self):
         """Synchronously restores everything we armed; called on app exit."""
         self.enabled = False  # blocks refresh()/evaluate() from re-arming
-        self._remove_object_hooks()
-        self._remove_foreground_hook()
+        self._remove_all_hooks()
         for worker in list(self._workers.values()):
             try:
                 worker.finished.disconnect()
@@ -310,7 +334,7 @@ class ImeGuard(QObject):
                 self._applied.pop(hwnd, None)
                 self._failed.discard(hwnd)
 
-    # ---- WinEvent hooks --------------------------------------------------
+    # ---- WinEvent hooks ---------------------------------------------------
 
     def _install_foreground_hook(self):
         proc = WinEventProc(self._on_foreground_event)
@@ -327,37 +351,70 @@ class ImeGuard(QObject):
             self._foreground_hook = handle
             self._foreground_proc = proc
 
-    def _update_object_hooks(self):
+    def _update_hooks(self):
         wanted = self.enabled and bool(self._hidden_hwnds)
-        if wanted and not self._object_hooks and self._ime_pids:
+        # hooks on out-of-process IME hosts
+        if wanted and not self._host_hooks and self._ime_pids:
             for pid in self._ime_pids:
-                proc = WinEventProc(self._on_ime_object_event)
-                handle = u32.SetWinEventHook(
-                    EVENT_OBJECT_CREATE,
-                    EVENT_OBJECT_SHOW,
-                    None,
-                    proc,
-                    pid,
-                    0,
-                    WINEVENT_OUTOFCONTEXT,
-                )
-                if handle:
-                    self._object_hooks.append(handle)
-                    self._object_hook_procs.append(proc)
-        elif not wanted and self._object_hooks:
-            self._remove_object_hooks()
+                self._add_hook(self._host_hooks, self._host_hook_procs,
+                               self._on_host_object_event, pid)
+        elif not wanted and self._host_hooks:
+            self._remove_host_hooks()
+        # hooks on the hidden windows' own processes (in-process IME UI,
+        # e.g. Sogou renders "SoPY_*" windows inside the focused app)
+        wanted_pids = {
+            pid for pid in (
+                self._pid_of(hwnd) for hwnd in self._hidden_hwnds
+            ) if pid
+        } if wanted else set()
+        for pid in wanted_pids - self._app_hook_pids:
+            self._add_hook(self._app_hooks, self._app_hook_procs,
+                           self._on_app_object_event, pid)
+            self._app_hook_pids.add(pid)
+        if not wanted_pids and self._app_hooks:
+            self._remove_app_hooks()
 
-    def _remove_object_hooks(self):
-        for handle in self._object_hooks:
+    def _add_hook(self, handles, procs, callback, pid):
+        proc = WinEventProc(callback)
+        handle = u32.SetWinEventHook(
+            EVENT_OBJECT_CREATE,
+            EVENT_OBJECT_SHOW,
+            None,
+            proc,
+            pid,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+        if handle:
+            handles.append(handle)
+            procs.append(proc)
+
+    def _remove_host_hooks(self):
+        for handle in self._host_hooks:
             u32.UnhookWinEvent(handle)
-        self._object_hooks = []
-        self._object_hook_procs = []
+        self._host_hooks = []
+        self._host_hook_procs = []
 
-    def _remove_foreground_hook(self):
+    def _remove_app_hooks(self):
+        for handle in self._app_hooks:
+            u32.UnhookWinEvent(handle)
+        self._app_hooks = []
+        self._app_hook_procs = []
+        self._app_hook_pids = set()
+
+    def _remove_all_hooks(self):
+        self._remove_host_hooks()
+        self._remove_app_hooks()
         if self._foreground_hook:
             u32.UnhookWinEvent(self._foreground_hook)
             self._foreground_hook = None
             self._foreground_proc = None
+
+    @staticmethod
+    def _pid_of(hwnd):
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value
 
     # Delivered on the GUI thread through the Qt message loop.
 
@@ -367,7 +424,20 @@ class ImeGuard(QObject):
         except Exception:
             pass
 
-    def _on_ime_object_event(self, _hook, event, hwnd, id_object, id_child, _tid, _time):
+    def _maybe_track(self, hwnd):
+        """Returns True if hwnd is an IME UI window we should manage."""
+        if u32.GetAncestor(hwnd, GA_ROOT) != hwnd:
+            return False  # affinity only works on top-level windows
+        if hwnd in self._ime_windows:
+            return True
+        class_buf = ctypes.create_unicode_buffer(64)
+        u32.GetClassNameW(hwnd, class_buf, 64)
+        if is_ime_class(class_buf.value):
+            self._ime_windows[hwnd] = class_buf.value
+            return True
+        return False
+
+    def _on_host_object_event(self, _hook, event, hwnd, id_object, id_child, _tid, _time):
         try:
             if id_object != OBJID_WINDOW or id_child != 0:
                 return
@@ -375,14 +445,18 @@ class ImeGuard(QObject):
                 self._ime_windows.pop(hwnd, None)
                 self._applied.pop(hwnd, None)
                 return
-            if u32.GetAncestor(hwnd, GA_ROOT) != hwnd:
-                return  # affinity only works on top-level windows
-            pid = wintypes.DWORD()
-            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value not in self._ime_pids:
+            if self._maybe_track(hwnd):
+                self._apply(hwnd, self._desired)
+        except Exception:
+            pass
+
+    def _on_app_object_event(self, _hook, event, hwnd, id_object, id_child, _tid, _time):
+        try:
+            if id_object != OBJID_WINDOW or id_child != 0:
                 return
-            if hwnd not in self._ime_windows:
-                self._ime_windows[hwnd] = ""
-            self._apply(hwnd, self._desired)
+            if event != EVENT_OBJECT_SHOW and event != EVENT_OBJECT_CREATE:
+                return
+            if self._maybe_track(hwnd):
+                self._apply(hwnd, self._desired)
         except Exception:
             pass

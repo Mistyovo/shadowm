@@ -10,7 +10,7 @@ It uses the native Windows API (`SetWindowDisplayAffinity`) to tag windows as `W
 - Extracts native application `.exe` icons
 - Double-click toggling
 - Optional switch to auto-hide newly detected windows by default
-- IME candidate protection: while typing pinyin in a hidden window with the built-in Microsoft IME, the candidate box is excluded from capture too
+- IME candidate protection: while typing in a hidden window, IME candidate bars (Sogou Pinyin `SoPY_*` windows, classic IME hosts) are excluded from capture too
 - Per-window on-screen opacity: make any listed window translucent locally while it stays excluded from capture
 - Pure memory bypass (no DLLs written to disk)
 
@@ -36,18 +36,16 @@ python main.py
 Toggle the checkbox next to any window to make it immediately invisible to OBS capture.
 
 ## IME Candidate Protection
-The pinyin candidate box of the Windows built-in IME is not rendered by the application you type into - it belongs to a separate system input process (`TextInputHost.exe` on Windows 10 1903+/Windows 11, `ChsIME.exe` on older builds). Hiding an application window alone therefore leaves the candidate box visible to screen capture.
+Hiding an application window does not hide the IME candidate bar floating above it, so ShadowM protects it separately while the "Also hide the IME candidate box" option is enabled and the foreground window is one ShadowM has hidden:
 
-When the "Also hide the IME candidate box" option is enabled, ShadowM tracks the foreground window:
-
-- The moment focus enters a window hidden by ShadowM, every top-level window of the input host process is tagged `WDA_EXCLUDEFROMCAPTURE` via the same remote-thread injection used for normal windows.
-- `SetWinEventHook` listeners arm any window the input host creates or shows afterwards (e.g. a freshly created candidate popup) within milliseconds.
-- When focus returns to a normal window, the IME windows are restored to `WDA_NONE`, so candidates show up in captures again.
+- **Sogou Pinyin (recommended)**: Sogou renders its UI (composition/candidate bar `SoPY_Comp`, status bar `SoPY_Status`, ...) as normal top-level windows *inside the application you type into*. ShadowM tracks them system-wide, pre-arms them via `SetWinEventHook` the moment they appear, and tags them `WDA_EXCLUDEFROMCAPTURE` through the usual remote-thread injection. They stay fully visible on your own screen but never appear in screenshots or recordings (verified against GDI BitBlt and DXGI desktop duplication), and are restored automatically when focus returns to a normal window.
+- Classic out-of-process IME hosts (`ChsIME.exe`, `ctfmon.exe`) are tagged the same way as a best effort.
+- **Microsoft Pinyin (modern Windows 11 UI)**: not supported. Its candidate box is a DirectComposition CoreWindow child of an explorer-hosted frame that completely ignores `SetWindowDisplayAffinity` (verified on Win11 24H2+); no per-window mechanism can exclude it from capture while keeping it on screen.
 
 Notes:
 - Requires the same privileges as regular window hiding (Administrator, 64-bit).
-- Only the built-in Microsoft input experience is covered; third-party IMEs (Sogou, Baidu, ...) draw their candidate windows from their own processes and are not targeted.
-- If ShadowM is killed abruptly while typing in a hidden window, the IME windows can stay excluded from capture. Simply start ShadowM again - it restores leftover state on launch - or toggle the IME checkbox off and back on.
+- In-process IME windows are caught by hooks installed on each hidden window's own process, so protection follows whichever app you are typing into.
+- If ShadowM is killed abruptly while typing in a hidden window, an armed candidate window can stay excluded from capture. Start ShadowM again - it restores leftover state on launch - or toggle the IME checkbox off and back on.
 
 ## Window Opacity
 The "Opacity" slider adjusts how transparent the selected window looks **on your screen** via `WS_EX_LAYERED` + `SetLayeredWindowAttributes` (these calls work on other processes' windows directly, no injection needed).

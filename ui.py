@@ -67,12 +67,11 @@ class WindowHiderUI(QWidget):
         )
         self.ime_guard_checkbox.setChecked(True)
         self.ime_guard_checkbox.setToolTip(
-            "The candidate box of the built-in Windows IME is drawn by a "
-            "separate system process (TextInputHost.exe / ChsIME.exe), so it "
-            "stays visible to capture tools even when the target window is "
-            "hidden. While the focused window is hidden, those IME windows "
-            "are excluded from capture too, and restored once focus returns "
-            "to a normal window."
+            "While the focused window is hidden, the IME candidate windows "
+            "(e.g. Sogou Pinyin's SoPY_* bars, rendered by the application "
+            "you type into) are also excluded from screen capture. They stay "
+            "fully visible on your own screen and are restored when focus "
+            "returns to a normal window."
         )
         self.ime_guard_checkbox.toggled.connect(self.ime_guard.set_enabled)
         layout.addWidget(self.ime_guard_checkbox)
@@ -264,7 +263,7 @@ class WindowHiderUI(QWidget):
 
     def on_ime_guard_active(self, active):
         self.status_label.setText(
-            "IME candidate box is now excluded from capture."
+            "IME candidate windows are excluded from capture."
             if active
             else ""
         )
