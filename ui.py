@@ -1,7 +1,9 @@
+import ctypes
 import json
 import os
 import sys
 import time
+from ctypes import wintypes
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -10,6 +12,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QSlider,
     QFileIconProvider,
@@ -17,7 +20,14 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QFileInfo
 from capture_hider import WindowCaptureHider
 from ime_hider import ImeGuard
+from taskbar_hider import TaskbarHider
 from window_opacity import WindowOpacity
+
+TASKBAR_SUFFIX = "  [taskbar hidden]"
+
+
+def _strip_taskbar_suffix(text: str) -> str:
+    return text[: -len(TASKBAR_SUFFIX)] if text.endswith(TASKBAR_SUFFIX) else text
 
 
 class HideWorker(QThread):
@@ -48,6 +58,14 @@ class CaptureSafeMessageBox(QMessageBox):
         WindowCaptureHider.set_window_hidden(int(self.winId()), True)
 
 
+class CaptureSafeMenu(QMenu):
+    """Context menu that is itself excluded from screen capture."""
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        WindowCaptureHider.set_window_hidden(int(self.winId()), True)
+
+
 class WindowHiderUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -69,6 +87,7 @@ class WindowHiderUI(QWidget):
 
         self._init_window()
         self._setup_ui()
+        self._register_hotkeys()
         self._setup_timer()
 
     # ---- remembered hidden windows -----------------------------------------
@@ -132,13 +151,20 @@ class WindowHiderUI(QWidget):
         layout.addWidget(self.ime_guard_checkbox)
 
         layout.addWidget(
-            QLabel("Check the windows below to hide them from screen capture:")
+            QLabel(
+                "Check the windows below to hide them from screen capture "
+                "(right-click one for taskbar / Alt-Tab options):"
+            )
         )
 
         self.list_widget = QListWidget()
         self.list_widget.itemChanged.connect(self.on_item_changed)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.list_widget.currentItemChanged.connect(self.on_current_item_changed)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(
+            self.on_list_context_menu
+        )
         layout.addWidget(self.list_widget)
 
         opacity_row = QHBoxLayout()
@@ -166,9 +192,35 @@ class WindowHiderUI(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_window_list)
         self.timer.timeout.connect(self.ime_guard.refresh)
+        self.timer.timeout.connect(TaskbarHider.reconcile)
         self.ime_guard.refresh()
         self.update_window_list()
         self.timer.start(1500)
+
+    def _register_hotkeys(self):
+        """Registers the global hotkeys; reports conflicts in the status line."""
+        self._hotkey_registered = TaskbarHider.register_hotkey(
+            int(self.winId()),
+            TaskbarHider.HOTKEY_TOGGLE_ALL,
+            TaskbarHider.MOD_CONTROL | TaskbarHider.MOD_ALT,
+            TaskbarHider.VK_T,
+        )
+        if not self._hotkey_registered:
+            self.status_label.setText(
+                "Ctrl+Alt+T is already taken by another application."
+            )
+
+    def nativeEvent(self, eventType, message):
+        """Dispatches WM_HOTKEY messages from the global hotkeys."""
+        if eventType == b"windows_generic_MSG":
+            msg = wintypes.MSG.from_address(int(message))
+            if (
+                msg.message == TaskbarHider.WM_HOTKEY
+                and msg.wParam == TaskbarHider.HOTKEY_TOGGLE_ALL
+            ):
+                self._toggle_all_taskbar_hidden()
+                return True, 0
+        return super().nativeEvent(eventType, message)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -228,13 +280,19 @@ class WindowHiderUI(QWidget):
                     and item.data(Qt.UserRole + 2)
                 ):
                     # closed while the user had it hidden: remember for relaunch
-                    self._remember_window(item.data(Qt.UserRole + 1), item.text())
+                    self._remember_window(
+                        item.data(Qt.UserRole + 1),
+                        _strip_taskbar_suffix(item.text()),
+                    )
                 self.list_widget.takeItem(i)
                 WindowOpacity.restore(hwnd)
+                TaskbarHider.forget(hwnd)
                 self.ime_guard.forget(hwnd)
                 self._hide_failures.pop(hwnd, None)
             else:
                 expected_text = current_hwnds[hwnd]["title"]
+                if item.data(Qt.UserRole + 4) and TaskbarHider.is_hidden(hwnd):
+                    expected_text += TASKBAR_SUFFIX
                 if item.text() != expected_text:
                     item.setText(expected_text)
                 del current_hwnds[hwnd]
@@ -303,6 +361,95 @@ class WindowHiderUI(QWidget):
         new_state = Qt.Checked if current_state == Qt.Unchecked else Qt.Unchecked
         item.setCheckState(new_state)
 
+    def on_list_context_menu(self, pos):
+        """Right-click toggle for taskbar / Alt-Tab visibility."""
+        item = self.list_widget.itemAt(pos)
+        if item is None:
+            return
+        hwnd = item.data(Qt.UserRole)
+        menu = CaptureSafeMenu(self)
+        action = menu.addAction("Hide from taskbar and Alt-Tab")
+        action.setCheckable(True)
+        action.setChecked(TaskbarHider.is_hidden(hwnd))
+        menu.addAction("Ctrl+Alt+T toggles all marked windows").setEnabled(False)
+        if menu.exec_(self.list_widget.mapToGlobal(pos)) is None:
+            return
+        was_hidden = TaskbarHider.is_hidden(hwnd)
+        if was_hidden:
+            success, msg = TaskbarHider.restore(hwnd)
+        else:
+            success, msg = TaskbarHider.hide(hwnd)
+        if not success:
+            self.status_label.setText(f"Taskbar toggle failed: {msg}")
+            return
+        self._mark_taskbar_hidden(item, not was_hidden)
+        title = _strip_taskbar_suffix(item.text())
+        self.status_label.setText(
+            f"Removed from taskbar/Alt-Tab: {title}"
+            if not was_hidden
+            else f"Back in the taskbar and Alt-Tab: {title}"
+        )
+
+    def _mark_taskbar_hidden(self, item: QListWidgetItem, hidden: bool):
+        """Adds or removes the item from the taskbar-hidden group."""
+        self._is_updating = True
+        item.setData(Qt.UserRole + 4, hidden)
+        self._is_updating = False
+        self._refresh_item_taskbar_text(item)
+
+    def _refresh_item_taskbar_text(self, item: QListWidgetItem):
+        """Syncs the [taskbar hidden] suffix with the live window state.
+
+        Group membership (the item flag) and actual hidden state can differ
+        while the hotkey has temporarily restored every marked window.
+        """
+        hidden = bool(item.data(Qt.UserRole + 4)) and TaskbarHider.is_hidden(
+            item.data(Qt.UserRole)
+        )
+        base = _strip_taskbar_suffix(item.text())
+        want = base + TASKBAR_SUFFIX if hidden else base
+        if want != item.text():
+            self._is_updating = True
+            item.setText(want)
+            self._is_updating = False
+
+    def _toggle_all_taskbar_hidden(self):
+        """Ctrl+Alt+T: flip taskbar hiding for every marked window at once.
+
+        If any marked window is currently back in the taskbar, all of them
+        get hidden again; if all are hidden, all of them get restored.
+        """
+        marked = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            hwnd = item.data(Qt.UserRole)
+            if item.data(Qt.UserRole + 4) and TaskbarHider.is_window(hwnd):
+                marked.append(item)
+        if not marked:
+            self.status_label.setText(
+                "No windows marked for taskbar hiding (right-click one first)."
+            )
+            return
+        hide = any(
+            not TaskbarHider.is_hidden(item.data(Qt.UserRole)) for item in marked
+        )
+        failures = 0
+        for item in marked:
+            hwnd = item.data(Qt.UserRole)
+            if hide:
+                success, _ = TaskbarHider.hide(hwnd)
+            else:
+                success, _ = TaskbarHider.restore(hwnd)
+            if success:
+                self._refresh_item_taskbar_text(item)
+            else:
+                failures += 1
+        self.status_label.setText(
+            f"Ctrl+Alt+T: {'hid' if hide else 'restored'} "
+            f"{len(marked) - failures} marked window(s)"
+            + (f" ({failures} failed)" if failures else "")
+        )
+
     def on_item_changed(self, item):
         if self._is_updating:
             return
@@ -365,7 +512,11 @@ class WindowHiderUI(QWidget):
         if not self._confirm_exit():
             event.ignore()
             return
+        TaskbarHider.unregister_hotkey(
+            int(self.winId()), TaskbarHider.HOTKEY_TOGGLE_ALL
+        )
         WindowOpacity.restore_all()
+        TaskbarHider.restore_all()
         self.ime_guard.shutdown()
         super().closeEvent(event)
 
@@ -376,7 +527,8 @@ class WindowHiderUI(QWidget):
         box.setIcon(QMessageBox.Question)
         box.setText("Quit ShadowM?")
         box.setInformativeText(
-            "All capture-hidden windows will be restored and IME candidate "
+            "All capture-hidden windows will be restored, taskbar-hidden "
+            "windows will reappear in the taskbar, and IME candidate "
             "protection will be lifted. Keep ShadowM running to stay "
             "protected."
         )

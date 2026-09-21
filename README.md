@@ -12,6 +12,8 @@ It uses the native Windows API (`SetWindowDisplayAffinity`) to tag windows as `W
 - Optional switch to auto-hide newly detected windows by default
 - IME candidate protection: while typing in a hidden window, IME candidate bars (Sogou Pinyin `SoPY_*` windows, classic IME hosts) are excluded from capture too
 - Per-window on-screen opacity: make any listed window translucent locally while it stays excluded from capture
+- Taskbar / Alt-Tab hiding: right-click any listed window to strip it from the taskbar and the Alt-Tab / Task View switcher (independent of capture hiding)
+- Global hotkey `Ctrl+Alt+T`: toggle taskbar/Alt-Tab hiding for all marked windows at once
 - Exit confirmation dialog (itself excluded from capture) to prevent accidental closure
 - Remembered hidden windows: applications closed while hidden are re-hidden automatically on next launch
 - Pure memory bypass (no DLLs written to disk)
@@ -65,6 +67,18 @@ It is purely a local visual effect and independent of capture exclusion:
 - A window that is *not* excluded will simply show up translucent in recordings, since captures reflect what the screen looks like.
 
 Moving the slider back to 100% fully restores the window (the layered style is removed again; windows that were already layered before only get their alpha reset). All opacities are restored automatically when ShadowM exits normally.
+
+## Taskbar / Alt-Tab Hiding
+Right-click any window in the list and toggle "Hide from taskbar and Alt-Tab" to remove it from the taskbar, Alt-Tab and Task View while it stays fully usable on screen. Marked windows carry a ` [taskbar hidden]` suffix while the hiding is actually active.
+
+This flips the window's extended style bits (`WS_EX_APPWINDOW` removed, `WS_EX_TOOLWINDOW` added) via `SetWindowLongPtrW` + `SetWindowPos(SWP_FRAMECHANGED)`. Like the opacity feature these calls work on other processes' windows directly, without injection - so this also works for 32-bit windows the capture path cannot reach, and it does not require Administrator privileges on its own.
+
+Once windows are marked, the global hotkey `Ctrl+Alt+T` flips the whole group at once: if any marked window is currently back in the taskbar, all of them get hidden; pressing it again brings them all back. Marking (right-click) is group membership, the suffix shows the live state, and unchecking via right-click removes a window from the group. If another application already owns `Ctrl+Alt+T`, ShadowM reports it in the status line; the key can be changed via the constants in `TaskbarHider` (`taskbar_hider.py`).
+
+Notes:
+- Independent of capture exclusion: a taskbar-hidden window still appears in recordings unless its capture checkbox is ticked as well.
+- The exact original style is remembered and restored when you toggle back, when the window closes, and on normal ShadowM exit.
+- If ShadowM is killed abruptly, affected windows stay out of the taskbar: start ShadowM again, right-click them and toggle the option off.
 
 ## Disclaimer
 This tool uses techniques typically employed by debugging and reverse engineering software (Read/Write Process Memory). Some aggressive Antivirus solutions might falsely flag the `CreateRemoteThread` action.
