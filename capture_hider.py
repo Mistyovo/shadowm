@@ -28,6 +28,9 @@ k32.CreateRemoteThread.restype = wintypes.HANDLE
 k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 k32.WaitForSingleObject.restype = wintypes.DWORD
 
+k32.GetExitCodeThread.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+k32.GetExitCodeThread.restype = wintypes.BOOL
+
 k32.CloseHandle.argtypes = [wintypes.HANDLE]
 k32.CloseHandle.restype = wintypes.BOOL
 
@@ -46,6 +49,9 @@ u32.GetWindowThreadProcessId.restype = wintypes.DWORD
 u32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
 u32.SetWindowDisplayAffinity.restype = wintypes.BOOL
 
+u32.GetWindowDisplayAffinity.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+u32.GetWindowDisplayAffinity.restype = wintypes.BOOL
+
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
@@ -53,6 +59,14 @@ class WindowCaptureHider:
     WDA_NONE = 0x00000000
     WDA_MONITOR = 0x00000001
     WDA_EXCLUDEFROMCAPTURE = 0x00000011
+
+    @classmethod
+    def get_window_affinity(cls, hwnd: int):
+        """Returns the window's current display affinity, or None on failure."""
+        affinity = wintypes.DWORD(0)
+        if u32.GetWindowDisplayAffinity(hwnd, ctypes.byref(affinity)):
+            return affinity.value
+        return None
 
     @classmethod
     def set_window_hidden(cls, hwnd: int, hidden: bool = True):
@@ -125,8 +139,14 @@ class WindowCaptureHider:
                 return False, f"CreateRemoteThread blocked (Code: {k32.GetLastError()}). Antivirus interception?"
                 
             k32.WaitForSingleObject(hThread, 2000)
+            exit_code = wintypes.DWORD(0)
+            k32.GetExitCodeThread(hThread, ctypes.byref(exit_code))
             k32.CloseHandle(hThread)
-            
+
+            # the thread exit code is SetWindowDisplayAffinity's return value;
+            # it can fail on a window caught too early after (re)launch
+            if not exit_code.value:
+                return False, "Remote SetWindowDisplayAffinity call failed (window may not be ready yet)."
             return True, "Successfully injected and enforced via remote code."
             
         finally:
@@ -143,10 +163,10 @@ class WindowCaptureHider:
                     u32.GetWindowTextW(hwnd, buff, length + 1)
                     title = buff.value
                     if title and title not in ("Program Manager", "Settings"):
+                        pid = wintypes.DWORD()
+                        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                         exe_path = ""
                         try:
-                            pid = wintypes.DWORD()
-                            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
                             hProc = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
                             if hProc:
@@ -157,8 +177,8 @@ class WindowCaptureHider:
                                 k32.CloseHandle(hProc)
                         except Exception:
                             pass
-                        
-                        windows.append({'hwnd': hwnd, 'title': title, 'exe_path': exe_path})
+
+                        windows.append({'hwnd': hwnd, 'title': title, 'exe_path': exe_path, 'pid': pid.value})
             return True
         enum_func = EnumWindowsProc(enum_win_proc)
         u32.EnumWindows(enum_func, 0)

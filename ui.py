@@ -54,6 +54,8 @@ class WindowHiderUI(QWidget):
         self._is_updating = False
         self._is_syncing_opacity = False
         self.workers = {}
+        self._hide_failures = {}
+        self._max_hide_failures = 3
         self.icon_provider = QFileIconProvider()
 
         self._remembered_file = os.path.join(
@@ -184,14 +186,42 @@ class WindowHiderUI(QWidget):
         self._remove_stale_or_update_existing_items(current_hwnds)
         self._add_new_items(current_hwnds)
         self._is_updating = False
+        self._reconcile_hidden_state()
+
+    def _reconcile_hidden_state(self):
+        """Re-applies hiding to checked windows that lost their affinity.
+
+        The display affinity silently drops when an app recreates its window
+        (e.g. after close/reopen, possibly reusing the same hwnd value), so
+        the real state is verified on every tick instead of trusting the
+        checkbox.
+        """
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            hwnd = item.data(Qt.UserRole)
+            if item.checkState() != Qt.Checked or hwnd in self.workers:
+                continue
+            if self._hide_failures.get(hwnd, 0) >= self._max_hide_failures:
+                continue
+            affinity = WindowCaptureHider.get_window_affinity(hwnd)
+            if affinity == WindowCaptureHider.WDA_EXCLUDEFROMCAPTURE:
+                continue
+            self._start_hide_worker(hwnd, True, auto=True)
 
     def _remove_stale_or_update_existing_items(self, current_hwnds: dict):
         """Removes closed windows from UI and updates titles of existing ones."""
         for i in range(self.list_widget.count() - 1, -1, -1):
             item = self.list_widget.item(i)
             hwnd = item.data(Qt.UserRole)
+            known_pid = item.data(Qt.UserRole + 3)
 
-            if hwnd not in current_hwnds:
+            # Windows reuses hwnd values: a same-hwnd window with a different
+            # pid is a new window that must go through new-window handling
+            same_window = hwnd in current_hwnds and (
+                known_pid is None or known_pid == current_hwnds[hwnd]["pid"]
+            )
+
+            if not same_window:
                 if (
                     item.checkState() == Qt.Checked
                     and hwnd != int(self.winId())
@@ -202,6 +232,7 @@ class WindowHiderUI(QWidget):
                 self.list_widget.takeItem(i)
                 WindowOpacity.restore(hwnd)
                 self.ime_guard.forget(hwnd)
+                self._hide_failures.pop(hwnd, None)
             else:
                 expected_text = current_hwnds[hwnd]["title"]
                 if item.text() != expected_text:
@@ -234,6 +265,7 @@ class WindowHiderUI(QWidget):
 
             item.setData(Qt.UserRole, hwnd)
             item.setData(Qt.UserRole + 1, exe_path)
+            item.setData(Qt.UserRole + 3, win_info.get("pid"))
 
             if exe_path:
                 icon = self.icon_provider.icon(QFileInfo(exe_path))
@@ -295,18 +327,39 @@ class WindowHiderUI(QWidget):
 
         self.ime_guard.note_window_state(hwnd, is_checked, success)
 
-        if success and not is_checked:
-            # unchecking a remembered window drops its auto-hide rule
-            item = self._get_item_by_hwnd(hwnd)
-            if item is not None:
-                self._forget_window(item.data(Qt.UserRole + 1))
+        if success:
+            self._hide_failures.pop(hwnd, None)
+            if not is_checked:
+                # unchecking a remembered window drops its auto-hide rule
+                item = self._get_item_by_hwnd(hwnd)
+                if item is not None:
+                    self._forget_window(item.data(Qt.UserRole + 1))
+            return
 
-        if not success:
-            item = self._get_item_by_hwnd(hwnd)
+        item = self._get_item_by_hwnd(hwnd)
+        if not is_checked:
+            # restore failed: put the checkbox back so it matches reality
             if item:
                 self._revert_item_state(item, is_checked)
-                if not auto:
-                    QMessageBox.warning(self, "Operation Failed", msg)
+            QMessageBox.warning(self, "Operation Failed", msg)
+            return
+
+        # hide failed: right after (re)launch the target window may not be
+        # ready yet - keep the checkbox and let the next sync tick retry
+        self._hide_failures[hwnd] = self._hide_failures.get(hwnd, 0) + 1
+        give_up = self._hide_failures[hwnd] >= self._max_hide_failures or item is None
+        if give_up:
+            self._hide_failures.pop(hwnd, None)
+            if item:
+                self._revert_item_state(item, is_checked)
+            if not auto:
+                QMessageBox.warning(self, "Operation Failed", msg)
+            else:
+                self.status_label.setText(f"Auto-hide failed: {msg}")
+        else:
+            self.status_label.setText(
+                f"Retrying hide ({self._hide_failures[hwnd]}): {msg}"
+            )
 
     def closeEvent(self, event):
         if not self._confirm_exit():
