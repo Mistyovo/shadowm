@@ -1,7 +1,6 @@
-import ctypes
 import json
+import logging
 import os
-import sys
 import time
 from ctypes import wintypes
 from PyQt5.QtWidgets import (
@@ -20,10 +19,21 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QFileInfo
 from capture_hider import WindowCaptureHider
 from ime_hider import ImeGuard
+from session_state import SessionState
 from taskbar_hider import TaskbarHider
 from window_opacity import WindowOpacity
 
+logger = logging.getLogger("shadowm")
+
 TASKBAR_SUFFIX = "  [taskbar hidden]"
+
+# QListWidgetItem data roles
+HwndRole = Qt.UserRole               # window handle
+ExeRole = Qt.UserRole + 1            # owning executable path
+ExplicitRole = Qt.UserRole + 2       # hidden by the user explicitly
+PidRole = Qt.UserRole + 3            # pid at discovery time
+TaskbarMemberRole = Qt.UserRole + 4  # taskbar-hide group membership
+MissRole = Qt.UserRole + 5           # consecutive refreshes missed
 
 
 def _strip_taskbar_suffix(text: str) -> str:
@@ -76,10 +86,16 @@ class WindowHiderUI(QWidget):
         self._max_hide_failures = 3
         self.icon_provider = QFileIconProvider()
 
-        self._remembered_file = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "remembered_hidden.json"
-        )
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self._remembered_file = os.path.join(base_dir, "remembered_hidden.json")
         self._remembered = self._load_remembered()
+
+        # crash recovery: whatever a previous run left on windows is undone
+        # here, before any new hiding happens
+        self.session = SessionState(os.path.join(base_dir, "shadowm_session.json"))
+        TaskbarHider.set_session(self.session)
+        WindowOpacity.set_session(self.session)
+        self._heal_session_leftovers()
 
         self.ime_guard = ImeGuard(self)
         self.ime_guard.active_changed.connect(self.on_ime_guard_active)
@@ -122,6 +138,60 @@ class WindowHiderUI(QWidget):
         if exe_path and exe_path in self._remembered:
             del self._remembered[exe_path]
             self._save_remembered()
+
+    # ---- crash recovery ------------------------------------------------------
+
+    def _heal_session_leftovers(self):
+        """Restores state a crashed previous run left on windows.
+
+        Entries whose window is still alive with the recorded pid get their
+        original style, affinity and opacity back; entries for dead windows
+        or stale boots are dropped silently.
+        """
+        healed = failed = 0
+
+        def alive_with_pid(hwnd, pid):
+            return (
+                TaskbarHider.is_window(hwnd)
+                and pid is not None
+                and WindowCaptureHider.get_window_pid(hwnd) == pid
+            )
+
+        for hwnd, info in self.session.taskbar_items():
+            if alive_with_pid(hwnd, info.get("pid")):
+                ok, _ = TaskbarHider.recover_leftover(
+                    hwnd, info.get("exstyle", 0)
+                )
+                if ok:
+                    healed += 1
+                else:
+                    failed += 1
+        for hwnd, info in self.session.opacity_items():
+            if alive_with_pid(hwnd, info.get("pid")):
+                ok, _ = WindowOpacity.recover_leftover(
+                    hwnd,
+                    bool(info.get("added_layered")),
+                    info.get("original_alpha"),
+                )
+                if ok:
+                    healed += 1
+                else:
+                    failed += 1
+        for hwnd, info in self.session.capture_items():
+            if alive_with_pid(hwnd, info.get("pid")):
+                ok, _ = WindowCaptureHider.set_window_hidden(hwnd, False)
+                if ok:
+                    healed += 1
+                else:
+                    failed += 1
+        if healed or failed:
+            logger.info(
+                "startup heal: restored %d leftover window(s), %d failed",
+                healed,
+                failed,
+            )
+        self.session.clear_all()
+        self.session.delete()
 
     def _init_window(self):
         self.setWindowTitle("ShadowM - Screen Capture Hider")
@@ -184,6 +254,12 @@ class WindowHiderUI(QWidget):
         opacity_row.addWidget(self.opacity_value_label)
         layout.addLayout(opacity_row)
 
+        # persistent (never overwritten) so the user cannot miss it
+        self.hotkey_warning_label = QLabel("")
+        self.hotkey_warning_label.setWordWrap(True)
+        self.hotkey_warning_label.setStyleSheet("color: #b34040;")
+        layout.addWidget(self.hotkey_warning_label)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
@@ -198,7 +274,7 @@ class WindowHiderUI(QWidget):
         self.timer.start(1500)
 
     def _register_hotkeys(self):
-        """Registers the global hotkeys; reports conflicts in the status line."""
+        """Registers the global hotkeys; reports conflicts persistently."""
         self._hotkey_registered = TaskbarHider.register_hotkey(
             int(self.winId()),
             TaskbarHider.HOTKEY_TOGGLE_ALL,
@@ -206,9 +282,11 @@ class WindowHiderUI(QWidget):
             TaskbarHider.VK_T,
         )
         if not self._hotkey_registered:
-            self.status_label.setText(
-                "Ctrl+Alt+T is already taken by another application."
+            self.hotkey_warning_label.setText(
+                "Ctrl+Alt+T is already taken by another application - the "
+                "taskbar hotkey is disabled until it is freed."
             )
+            logger.warning("Ctrl+Alt+T registration failed (already taken)")
 
     def nativeEvent(self, eventType, message):
         """Dispatches WM_HOTKEY messages from the global hotkeys."""
@@ -250,8 +328,10 @@ class WindowHiderUI(QWidget):
         """
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            hwnd = item.data(Qt.UserRole)
+            hwnd = item.data(HwndRole)
             if item.checkState() != Qt.Checked or hwnd in self.workers:
+                continue
+            if not WindowCaptureHider.window_exists(hwnd):
                 continue
             if self._hide_failures.get(hwnd, 0) >= self._max_hide_failures:
                 continue
@@ -261,11 +341,17 @@ class WindowHiderUI(QWidget):
             self._start_hide_worker(hwnd, True, auto=True)
 
     def _remove_stale_or_update_existing_items(self, current_hwnds: dict):
-        """Removes closed windows from UI and updates titles of existing ones."""
+        """Removes closed windows from UI and updates titles of existing ones.
+
+        A window missing from a single refresh is not treated as closed yet:
+        titles can blank out for a moment and tray apps hide their windows
+        entirely, so removal (and its bookkeeping) waits for a second
+        consecutive miss.
+        """
         for i in range(self.list_widget.count() - 1, -1, -1):
             item = self.list_widget.item(i)
-            hwnd = item.data(Qt.UserRole)
-            known_pid = item.data(Qt.UserRole + 3)
+            hwnd = item.data(HwndRole)
+            known_pid = item.data(PidRole)
 
             # Windows reuses hwnd values: a same-hwnd window with a different
             # pid is a new window that must go through new-window handling
@@ -274,24 +360,33 @@ class WindowHiderUI(QWidget):
             )
 
             if not same_window:
+                misses = (item.data(MissRole) or 0) + 1
+                item.setData(MissRole, misses)
+                if misses < 2:
+                    continue  # enumeration flicker: re-check next refresh
                 if (
                     item.checkState() == Qt.Checked
                     and hwnd != int(self.winId())
-                    and item.data(Qt.UserRole + 2)
+                    and item.data(ExplicitRole)
                 ):
                     # closed while the user had it hidden: remember for relaunch
                     self._remember_window(
-                        item.data(Qt.UserRole + 1),
+                        item.data(ExeRole),
                         _strip_taskbar_suffix(item.text()),
                     )
                 self.list_widget.takeItem(i)
-                WindowOpacity.restore(hwnd)
-                TaskbarHider.forget(hwnd)
+                if not WindowCaptureHider.window_exists(hwnd):
+                    # truly gone: drop our bookkeeping for good
+                    WindowOpacity.restore(hwnd)
+                    TaskbarHider.forget(hwnd)
+                # still alive (e.g. minimized to the tray): keep styles and
+                # tracking; TaskbarHider.reconcile keeps enforcing them
                 self.ime_guard.forget(hwnd)
                 self._hide_failures.pop(hwnd, None)
             else:
+                item.setData(MissRole, 0)
                 expected_text = current_hwnds[hwnd]["title"]
-                if item.data(Qt.UserRole + 4) and TaskbarHider.is_hidden(hwnd):
+                if item.data(TaskbarMemberRole) and TaskbarHider.is_hidden(hwnd):
                     expected_text += TASKBAR_SUFFIX
                 if item.text() != expected_text:
                     item.setText(expected_text)
@@ -321,9 +416,15 @@ class WindowHiderUI(QWidget):
                 if hide_by_default:
                     self._start_hide_worker(hwnd, True, auto=True)
 
-            item.setData(Qt.UserRole, hwnd)
-            item.setData(Qt.UserRole + 1, exe_path)
-            item.setData(Qt.UserRole + 3, win_info.get("pid"))
+            item.setData(HwndRole, hwnd)
+            item.setData(ExeRole, exe_path)
+            item.setData(PidRole, win_info.get("pid"))
+
+            if hwnd != int(self.winId()) and TaskbarHider.is_tracked(hwnd):
+                # still tracked from before the window left the list (e.g.
+                # it was minimized to the tray): re-attach it to the group
+                item.setData(TaskbarMemberRole, True)
+                self._refresh_item_taskbar_text(item)
 
             if exe_path:
                 icon = self.icon_provider.icon(QFileInfo(exe_path))
@@ -336,7 +437,7 @@ class WindowHiderUI(QWidget):
         """Helper to find a QListWidgetItem by its associated window handle."""
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            if item.data(Qt.UserRole) == hwnd:
+            if item.data(HwndRole) == hwnd:
                 return item
         return None
 
@@ -356,6 +457,15 @@ class WindowHiderUI(QWidget):
         item.setCheckState(Qt.Unchecked if is_checked else Qt.Checked)
         self._is_updating = False
 
+    def _warn_box(self, text: str):
+        """Shows a warning dialog that is itself excluded from capture."""
+        box = CaptureSafeMessageBox(self)
+        box.setWindowTitle("ShadowM")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
+
     def on_item_double_clicked(self, item):
         current_state = item.checkState()
         new_state = Qt.Checked if current_state == Qt.Unchecked else Qt.Unchecked
@@ -366,34 +476,36 @@ class WindowHiderUI(QWidget):
         item = self.list_widget.itemAt(pos)
         if item is None:
             return
-        hwnd = item.data(Qt.UserRole)
+        hwnd = item.data(HwndRole)
         menu = CaptureSafeMenu(self)
         action = menu.addAction("Hide from taskbar and Alt-Tab")
         action.setCheckable(True)
-        action.setChecked(TaskbarHider.is_hidden(hwnd))
+        # membership, not the live style bit: a native tool window we never
+        # touched must not be offered as "already hidden by us"
+        action.setChecked(TaskbarHider.is_tracked(hwnd))
         menu.addAction("Ctrl+Alt+T toggles all marked windows").setEnabled(False)
         if menu.exec_(self.list_widget.mapToGlobal(pos)) is None:
             return
-        was_hidden = TaskbarHider.is_hidden(hwnd)
-        if was_hidden:
+        was_tracked = TaskbarHider.is_tracked(hwnd)
+        if was_tracked:
             success, msg = TaskbarHider.restore(hwnd)
         else:
             success, msg = TaskbarHider.hide(hwnd)
         if not success:
             self.status_label.setText(f"Taskbar toggle failed: {msg}")
             return
-        self._mark_taskbar_hidden(item, not was_hidden)
+        self._mark_taskbar_hidden(item, not was_tracked)
         title = _strip_taskbar_suffix(item.text())
         self.status_label.setText(
-            f"Removed from taskbar/Alt-Tab: {title}"
-            if not was_hidden
-            else f"Back in the taskbar and Alt-Tab: {title}"
+            f"Back in the taskbar and Alt-Tab: {title}"
+            if was_tracked
+            else f"Removed from taskbar/Alt-Tab: {title}"
         )
 
     def _mark_taskbar_hidden(self, item: QListWidgetItem, hidden: bool):
         """Adds or removes the item from the taskbar-hidden group."""
         self._is_updating = True
-        item.setData(Qt.UserRole + 4, hidden)
+        item.setData(TaskbarMemberRole, hidden)
         self._is_updating = False
         self._refresh_item_taskbar_text(item)
 
@@ -403,8 +515,8 @@ class WindowHiderUI(QWidget):
         Group membership (the item flag) and actual hidden state can differ
         while the hotkey has temporarily restored every marked window.
         """
-        hidden = bool(item.data(Qt.UserRole + 4)) and TaskbarHider.is_hidden(
-            item.data(Qt.UserRole)
+        hidden = bool(item.data(TaskbarMemberRole)) and TaskbarHider.is_hidden(
+            item.data(HwndRole)
         )
         base = _strip_taskbar_suffix(item.text())
         want = base + TASKBAR_SUFFIX if hidden else base
@@ -422,8 +534,8 @@ class WindowHiderUI(QWidget):
         marked = []
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            hwnd = item.data(Qt.UserRole)
-            if item.data(Qt.UserRole + 4) and TaskbarHider.is_window(hwnd):
+            hwnd = item.data(HwndRole)
+            if item.data(TaskbarMemberRole) and TaskbarHider.is_window(hwnd):
                 marked.append(item)
         if not marked:
             self.status_label.setText(
@@ -431,11 +543,11 @@ class WindowHiderUI(QWidget):
             )
             return
         hide = any(
-            not TaskbarHider.is_hidden(item.data(Qt.UserRole)) for item in marked
+            not TaskbarHider.is_hidden(item.data(HwndRole)) for item in marked
         )
         failures = 0
         for item in marked:
-            hwnd = item.data(Qt.UserRole)
+            hwnd = item.data(HwndRole)
             if hide:
                 success, _ = TaskbarHider.hide(hwnd)
             else:
@@ -454,16 +566,20 @@ class WindowHiderUI(QWidget):
         if self._is_updating:
             return
 
-        hwnd = item.data(Qt.UserRole)
+        hwnd = item.data(HwndRole)
         is_checked = item.checkState() == Qt.Checked
         if is_checked:
             # setData re-emits itemChanged; suppress the re-entry
             self._is_updating = True
-            item.setData(Qt.UserRole + 2, True)  # hidden by the user explicitly
+            item.setData(ExplicitRole, True)  # hidden by the user explicitly
             self._is_updating = False
 
         if not self._start_hide_worker(hwnd, is_checked):
             self._revert_item_state(item, is_checked)
+            self.status_label.setText(
+                "Another hide operation is still running for this window - "
+                "try again in a moment."
+            )
 
     def on_hide_finished(self, hwnd, is_checked, success, msg):
         worker = self.workers.pop(hwnd, None)
@@ -474,21 +590,30 @@ class WindowHiderUI(QWidget):
 
         self.ime_guard.note_window_state(hwnd, is_checked, success)
 
+        item = self._get_item_by_hwnd(hwnd)
+        own_hwnd = int(self.winId())
+
         if success:
             self._hide_failures.pop(hwnd, None)
-            if not is_checked:
+            if is_checked:
+                if item is not None and hwnd != own_hwnd:
+                    self.session.note_capture_hidden(
+                        hwnd, item.data(PidRole), item.data(ExeRole)
+                    )
+                    exe = item.data(ExeRole) or f"hwnd {hwnd}"
+                    logger.info("hidden from capture: %s", os.path.basename(exe))
+            else:
+                self.session.clear_capture(hwnd)
                 # unchecking a remembered window drops its auto-hide rule
-                item = self._get_item_by_hwnd(hwnd)
                 if item is not None:
-                    self._forget_window(item.data(Qt.UserRole + 1))
+                    self._forget_window(item.data(ExeRole))
             return
 
-        item = self._get_item_by_hwnd(hwnd)
         if not is_checked:
             # restore failed: put the checkbox back so it matches reality
             if item:
                 self._revert_item_state(item, is_checked)
-            QMessageBox.warning(self, "Operation Failed", msg)
+            self._warn_box(msg)
             return
 
         # hide failed: right after (re)launch the target window may not be
@@ -500,9 +625,10 @@ class WindowHiderUI(QWidget):
             if item:
                 self._revert_item_state(item, is_checked)
             if not auto:
-                QMessageBox.warning(self, "Operation Failed", msg)
+                self._warn_box(msg)
             else:
                 self.status_label.setText(f"Auto-hide failed: {msg}")
+                logger.warning("auto-hide failed for hwnd %s: %s", hwnd, msg)
         else:
             self.status_label.setText(
                 f"Retrying hide ({self._hide_failures[hwnd]}): {msg}"
@@ -512,13 +638,54 @@ class WindowHiderUI(QWidget):
         if not self._confirm_exit():
             event.ignore()
             return
+        self.timer.stop()
+        # let in-flight workers finish first: destroying a running QThread
+        # aborts the process, and the restores below must see final state
+        for worker in list(self.workers.values()):
+            worker.wait(3000)
+        self.workers.clear()
+        self._restore_all_protected_state()
         TaskbarHider.unregister_hotkey(
             int(self.winId()), TaskbarHider.HOTKEY_TOGGLE_ALL
         )
+        super().closeEvent(event)
+
+    def _restore_all_protected_state(self):
+        """Undoes everything ShadowM applied to other windows (normal exit)."""
+        own_hwnd = int(self.winId())
+        targets = {}
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            hwnd = item.data(HwndRole)
+            if item.checkState() == Qt.Checked and hwnd != own_hwnd:
+                targets[hwnd] = item.data(ExeRole)
+        for hwnd, info in self.session.capture_items():
+            # covers windows still hidden but no longer listed (tray apps)
+            targets.setdefault(hwnd, info.get("exe", ""))
+
+        restored = failed = 0
+        for hwnd, exe in targets.items():
+            ok, msg = WindowCaptureHider.set_window_hidden(hwnd, False)
+            if ok:
+                restored += 1
+                self.session.clear_capture(hwnd)
+            else:
+                failed += 1
+                logger.warning(
+                    "could not restore capture state of %s: %s",
+                    os.path.basename(exe) if exe else f"hwnd {hwnd}",
+                    msg,
+                )
+
         WindowOpacity.restore_all()
         TaskbarHider.restore_all()
         self.ime_guard.shutdown()
-        super().closeEvent(event)
+
+        if self.session.is_empty():
+            self.session.delete()
+        else:
+            self.session.save()  # keep leftovers for next-launch healing
+        logger.info("exit: capture restored=%d failed=%d", restored, failed)
 
     def _confirm_exit(self) -> bool:
         """Asks before quitting so ShadowM is not closed by accident."""
@@ -541,7 +708,7 @@ class WindowHiderUI(QWidget):
         if current is None:
             self.opacity_slider.setEnabled(False)
             return
-        hwnd = current.data(Qt.UserRole)
+        hwnd = current.data(HwndRole)
         self.opacity_slider.setEnabled(True)
         self._is_syncing_opacity = True
         self.opacity_slider.setValue(WindowOpacity.get_percent(hwnd))
@@ -555,7 +722,7 @@ class WindowHiderUI(QWidget):
         item = self.list_widget.currentItem()
         if item is None:
             return
-        hwnd = item.data(Qt.UserRole)
+        hwnd = item.data(HwndRole)
         if value >= 100:
             success, msg = WindowOpacity.restore(hwnd)
         else:

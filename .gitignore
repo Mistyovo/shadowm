@@ -37,6 +37,8 @@ desktop.ini
 # Project specific
 build_env/
 remembered_hidden.json
+shadowm_session.json
+shadowm_session.json.tmp
 
 # Build tools and downloads
 upx/

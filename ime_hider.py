@@ -70,20 +70,9 @@ class PROCESSENTRY32W(ctypes.Structure):
     ]
 
 
-k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-k32.Process32FirstW.restype = wintypes.BOOL
-k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-k32.Process32NextW.restype = wintypes.BOOL
+# Process/module snapshot declarations live in capture_hider (shared k32).
 
 u32.GetForegroundWindow.restype = wintypes.HWND
-u32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-u32.GetClassNameW.restype = ctypes.c_int
-u32.IsWindow.argtypes = [wintypes.HWND]
-u32.IsWindow.restype = wintypes.BOOL
-u32.IsWindowVisible.argtypes = [wintypes.HWND]
-u32.IsWindowVisible.restype = wintypes.BOOL
 u32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 u32.GetAncestor.restype = wintypes.HWND
 

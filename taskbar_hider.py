@@ -75,6 +75,13 @@ class TaskbarHider:
     # hwnd -> (exstyle before we hid it, pid of the owning process); the pid
     # guards against Windows reusing a hwnd value for a brand-new window
     _original = {}
+    # optional SessionState hook so a crashed run's styles can be healed
+    _session = None
+
+    @staticmethod
+    def set_session(session):
+        """Attaches the crash-recovery session file (or None to detach)."""
+        TaskbarHider._session = session
 
     @staticmethod
     def is_window(hwnd: int) -> bool:
@@ -101,6 +108,12 @@ class TaskbarHider:
         return bool(style & WS_EX_TOOLWINDOW) and not style & WS_EX_APPWINDOW
 
     @classmethod
+    def is_tracked(cls, hwnd: int) -> bool:
+        """True while we own this window's taskbar style (hide/restore pair)."""
+        entry = cls._original.get(hwnd)
+        return entry is not None and cls._pid_of(hwnd) == entry[1]
+
+    @classmethod
     def hide(cls, hwnd: int):
         """Removes hwnd from the taskbar and the Alt-Tab / Task View list."""
         if not u32.IsWindow(hwnd):
@@ -108,19 +121,24 @@ class TaskbarHider:
         pid = cls._pid_of(hwnd)
         entry = cls._original.get(hwnd)
         if entry is not None and entry[1] != pid:
-            cls._original.pop(hwnd, None)  # hwnd was reused: stale entry
+            cls._forget_tracking(hwnd)  # hwnd was reused: stale entry
             entry = None
         style = _get_exstyle(hwnd, GWL_EXSTYLE)
-        # a window that is already hidden (e.g. leftover from a crashed
-        # session) stays untracked so restore() can still recover it
-        if entry is None and not cls.is_hidden(hwnd):
-            cls._original[hwnd] = (style, pid)
+        if entry is None:
+            # Remember what to restore. A window that already looks hidden
+            # (native tool window, or a leftover from a crashed session) is
+            # recorded with TOOLWINDOW presumed ours so a later restore
+            # surfaces it in the taskbar again.
+            original = style & ~WS_EX_TOOLWINDOW if style & WS_EX_TOOLWINDOW else style
+            cls._original[hwnd] = (original, pid)
+            if cls._session is not None:
+                cls._session.note_taskbar_hidden(hwnd, pid, original)
         target = (style & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW
         if target == style:
             return True, ""
         if not cls._apply(hwnd, target):
             return False, (
-                f"SetWindowLongPtr failed (Code: {ctypes.GetLastError()})"
+                f"SetWindowLongPtr failed (Code: {ctypes.get_last_error()})"
             )
         return True, ""
 
@@ -128,7 +146,7 @@ class TaskbarHider:
     def restore(cls, hwnd: int):
         """Puts hwnd back into the taskbar and Alt-Tab."""
         if not u32.IsWindow(hwnd):
-            cls._original.pop(hwnd, None)
+            cls._forget_tracking(hwnd)
             return True, ""
         entry = cls._original.get(hwnd)
         tracked = entry is not None and entry[1] == cls._pid_of(hwnd)
@@ -136,17 +154,28 @@ class TaskbarHider:
         if tracked:
             target = entry[0]
         elif style & WS_EX_TOOLWINDOW:
-            # untracked (native tool window or crash leftover): clearing
-            # TOOLWINDOW alone restores the default taskbar behavior
+            # untracked already-hidden window: assume a crashed session (or
+            # a previous ShadowM version) left it here and surface it again
             target = style & ~WS_EX_TOOLWINDOW
         else:
-            cls._original.pop(hwnd, None)
+            cls._forget_tracking(hwnd)
             return True, ""
         if not cls._apply(hwnd, target):
             return False, (
-                f"SetWindowLongPtr failed (Code: {ctypes.GetLastError()})"
+                f"SetWindowLongPtr failed (Code: {ctypes.get_last_error()})"
             )
-        cls._original.pop(hwnd, None)
+        cls._forget_tracking(hwnd)
+        return True, ""
+
+    @classmethod
+    def recover_leftover(cls, hwnd: int, exstyle: int):
+        """Startup heal: re-applies a style recorded by a crashed run."""
+        if not u32.IsWindow(hwnd):
+            return True, ""
+        if not cls._apply(hwnd, exstyle):
+            return False, (
+                f"SetWindowLongPtr failed (Code: {ctypes.get_last_error()})"
+            )
         return True, ""
 
     @classmethod
@@ -154,7 +183,7 @@ class TaskbarHider:
         """Re-hides tracked windows that lost the style; forgets dead hwnds."""
         for hwnd, (_, pid) in list(cls._original.items()):
             if not u32.IsWindow(hwnd) or cls._pid_of(hwnd) != pid:
-                cls._original.pop(hwnd, None)
+                cls._forget_tracking(hwnd)
             elif not cls.is_hidden(hwnd):
                 style = _get_exstyle(hwnd, GWL_EXSTYLE)
                 cls._apply(hwnd, (style & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW)
@@ -162,13 +191,19 @@ class TaskbarHider:
     @classmethod
     def forget(cls, hwnd: int):
         """Drops tracking for a window that left the list (no style change)."""
-        cls._original.pop(hwnd, None)
+        cls._forget_tracking(hwnd)
 
     @classmethod
     def restore_all(cls):
         """Puts every window we hid this session back into the taskbar."""
         for hwnd in list(cls._original):
             cls.restore(hwnd)
+
+    @classmethod
+    def _forget_tracking(cls, hwnd: int):
+        cls._original.pop(hwnd, None)
+        if cls._session is not None:
+            cls._session.clear_taskbar(hwnd)
 
     @classmethod
     def _apply(cls, hwnd: int, exstyle: int) -> bool:

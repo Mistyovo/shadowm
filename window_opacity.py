@@ -16,7 +16,7 @@ recordings (captures reflect what the screen looks like).
 import ctypes
 from ctypes import wintypes
 
-from capture_hider import u32
+from capture_hider import u32, get_window_pid
 
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
@@ -50,13 +50,19 @@ u32.GetLayeredWindowAttributes.argtypes = [
     ctypes.POINTER(wintypes.DWORD),
 ]
 u32.GetLayeredWindowAttributes.restype = wintypes.BOOL
-u32.IsWindow.argtypes = [wintypes.HWND]
-u32.IsWindow.restype = wintypes.BOOL
 
 
 class WindowOpacity:
-    _layered_added = set()  # hwnds we gave the WS_EX_LAYERED style ourselves
-    _applied = {}           # hwnd -> last opacity percent we set
+    # hwnd -> (pid, we_added_layered, original_alpha or None); the pid guards
+    # against Windows reusing a hwnd value for a brand-new window
+    _state = {}
+    # optional SessionState hook so a crashed run's styles can be healed
+    _session = None
+
+    @staticmethod
+    def set_session(session):
+        """Attaches the crash-recovery session file (or None to detach)."""
+        WindowOpacity._session = session
 
     @classmethod
     def set_opacity(cls, hwnd: int, percent: int):
@@ -65,46 +71,87 @@ class WindowOpacity:
             return False, "Opacity must be between 1% and 100%."
         if not u32.IsWindow(hwnd):
             return False, "Window no longer exists."
-        alpha = max(1, round(255 * percent / 100))  # never fully invisible
+
+        pid = get_window_pid(hwnd)
+        entry = cls._state.get(hwnd)
+        if entry is None or entry[0] != pid:
+            # first touch: remember how to undo whatever we are about to do
+            style = _get_exstyle(hwnd, GWL_EXSTYLE)
+            added_layered = not style & WS_EX_LAYERED
+            original_alpha = None
+            if not added_layered:
+                key = wintypes.COLORREF(0)
+                alpha = wintypes.BYTE(0)
+                flags = wintypes.DWORD(0)
+                if (
+                    u32.GetLayeredWindowAttributes(
+                        hwnd, ctypes.byref(key), ctypes.byref(alpha), ctypes.byref(flags)
+                    )
+                    and flags.value & LWA_ALPHA
+                ):
+                    original_alpha = alpha.value
+            cls._state[hwnd] = (pid, added_layered, original_alpha)
+            if cls._session is not None:
+                cls._session.note_opacity(hwnd, pid, added_layered, original_alpha)
+
         style = _get_exstyle(hwnd, GWL_EXSTYLE)
         if not style & WS_EX_LAYERED:
             if not _set_exstyle(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED):
                 return False, (
-                    f"SetWindowLongPtr failed (Code: {ctypes.GetLastError()})"
+                    f"SetWindowLongPtr failed (Code: {ctypes.get_last_error()})"
                 )
-            cls._layered_added.add(hwnd)
+        alpha = max(1, round(255 * percent / 100))  # never fully invisible
         if not u32.SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA):
             return False, (
                 f"SetLayeredWindowAttributes failed "
-                f"(Code: {ctypes.GetLastError()})"
+                f"(Code: {ctypes.get_last_error()})"
             )
-        cls._applied[hwnd] = percent
         return True, ""
 
     @classmethod
     def restore(cls, hwnd: int):
-        """Returns hwnd to normal rendering (drops our layered style)."""
-        if hwnd not in cls._applied and hwnd not in cls._layered_added:
+        """Returns hwnd to the translucency it had before we touched it."""
+        entry = cls._state.get(hwnd)
+        if entry is None:
             return True, ""
-        if not u32.IsWindow(hwnd):
-            cls._applied.pop(hwnd, None)
-            cls._layered_added.discard(hwnd)
+        pid, added_layered, original_alpha = entry
+        if not u32.IsWindow(hwnd) or get_window_pid(hwnd) != pid:
+            # dead window, or hwnd already reused by a different process
+            cls._forget(hwnd)
             return True, ""
-        if hwnd in cls._layered_added:
+        if added_layered:
             style = _get_exstyle(hwnd, GWL_EXSTYLE)
             _set_exstyle(hwnd, GWL_EXSTYLE, style & ~WS_EX_LAYERED)
-            cls._layered_added.discard(hwnd)
         else:
-            # Window was already layered before us: only reset the alpha.
-            u32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
-        cls._applied.pop(hwnd, None)
+            # window was already layered before us: put its own alpha back
+            alpha = original_alpha if original_alpha is not None else 255
+            u32.SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA)
+        cls._forget(hwnd)
+        return True, ""
+
+    @classmethod
+    def recover_leftover(cls, hwnd: int, added_layered: bool, original_alpha):
+        """Startup heal: undoes a change recorded by a crashed run."""
+        if not u32.IsWindow(hwnd):
+            return True, ""
+        if added_layered:
+            style = _get_exstyle(hwnd, GWL_EXSTYLE)
+            _set_exstyle(hwnd, GWL_EXSTYLE, style & ~WS_EX_LAYERED)
+        elif original_alpha is not None:
+            u32.SetLayeredWindowAttributes(hwnd, 0, original_alpha, LWA_ALPHA)
         return True, ""
 
     @classmethod
     def restore_all(cls):
         """Restores every window we ever made translucent."""
-        for hwnd in list(cls._applied):
+        for hwnd in list(cls._state):
             cls.restore(hwnd)
+
+    @classmethod
+    def _forget(cls, hwnd: int):
+        cls._state.pop(hwnd, None)
+        if cls._session is not None:
+            cls._session.clear_opacity(hwnd)
 
     @classmethod
     def get_percent(cls, hwnd: int) -> int:
