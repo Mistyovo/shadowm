@@ -14,6 +14,7 @@ It uses the native Windows API (`SetWindowDisplayAffinity`) to tag windows as `W
 - Per-window on-screen opacity: make any listed window translucent locally while it stays excluded from capture
 - Taskbar / Alt-Tab hiding: right-click any listed window to strip it from the taskbar and the Alt-Tab / Task View switcher (independent of capture hiding)
 - Global hotkey `Ctrl+Alt+T`: toggle taskbar/Alt-Tab hiding for all marked windows at once
+- "Show window" menu action: un-minimize and focus any listed window, including taskbar-hidden ones the system UI can no longer reach
 - Exit confirmation dialog (itself excluded from capture) to prevent accidental closure
 - Remembered hidden windows: applications closed while hidden are re-hidden automatically on next launch
 - Clean exit restores *everything* (capture exclusion, taskbar styles, opacity, IME protection)
@@ -87,6 +88,8 @@ Right-click any window in the list and toggle "Hide from taskbar and Alt-Tab" to
 This flips the window's extended style bits (`WS_EX_APPWINDOW` removed, `WS_EX_TOOLWINDOW` added) via `SetWindowLongPtrW` + `SetWindowPos(SWP_FRAMECHANGED)`. Like the opacity feature these calls work on other processes' windows directly, without injection - so this also works for 32-bit windows the capture path cannot reach, and it does not require Administrator privileges on its own.
 
 Once windows are marked, the global hotkey `Ctrl+Alt+T` flips the whole group at once: if any marked window is currently back in the taskbar, all of them get hidden; pressing it again brings them all back. Marking (right-click) is group membership, the suffix shows the live state, and unchecking via right-click removes a window from the group. If another application already owns `Ctrl+Alt+T`, ShadowM shows a permanent notice under the status line; the key can be changed via the constants in `TaskbarHider` (`taskbar_hider.py`).
+
+The same right-click menu also offers "Show window" (`ShowWindow(SW_RESTORE)` + `SetForegroundWindow`, no injection): it un-minimizes the window and brings it to the foreground. This is the way back for a taskbar-hidden window that got minimized - with no taskbar button and no Alt-Tab entry there is no system UI left to restore it, and `Win+D` only un-minimizes windows it minimized itself.
 
 Notes:
 - Independent of capture exclusion: a taskbar-hidden window still appears in recordings unless its capture checkbox is ticked as well.

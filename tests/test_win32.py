@@ -77,9 +77,12 @@ u32.DestroyWindow.argtypes = [wintypes.HWND]
 u32.DestroyWindow.restype = wintypes.BOOL
 u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 u32.ShowWindow.restype = wintypes.BOOL
+u32.IsIconic.argtypes = [wintypes.HWND]
+u32.IsIconic.restype = wintypes.BOOL
 
 WS_OVERLAPPEDWINDOW = 0x00CF0000
 SW_SHOWNOACTIVATE = 4
+SW_MINIMIZE = 6
 
 
 def _wnd_proc(hwnd, msg, wparam, lparam):
@@ -212,6 +215,25 @@ class TaskbarHiderTests(unittest.TestCase):
         ok, _ = TaskbarHider.restore(hwnd)
         self.assertTrue(ok)
         self.assertFalse(TaskbarHider.is_tracked(hwnd))
+
+
+class ShowWindowTests(unittest.TestCase):
+    def test_unminimizes_minimized_window(self):
+        hwnd, name, hinst = make_window(visible=True)
+        try:
+            u32.ShowWindow(hwnd, SW_MINIMIZE)
+            self.assertTrue(u32.IsIconic(hwnd))
+            ok, msg = TaskbarHider.show_window(hwnd)
+            self.assertTrue(ok, msg)
+            self.assertFalse(u32.IsIconic(hwnd))
+        finally:
+            destroy_window(hwnd, name, hinst)
+
+    def test_show_dead_window(self):
+        hwnd, name, hinst = make_window()
+        destroy_window(hwnd, name, hinst)
+        ok, _ = TaskbarHider.show_window(hwnd)
+        self.assertFalse(ok)
 
 
 class WindowOpacityTests(unittest.TestCase):

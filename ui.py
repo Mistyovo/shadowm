@@ -472,19 +472,24 @@ class WindowHiderUI(QWidget):
         item.setCheckState(new_state)
 
     def on_list_context_menu(self, pos):
-        """Right-click toggle for taskbar / Alt-Tab visibility."""
+        """Right-click actions: taskbar / Alt-Tab visibility, show window."""
         item = self.list_widget.itemAt(pos)
         if item is None:
             return
         hwnd = item.data(HwndRole)
         menu = CaptureSafeMenu(self)
-        action = menu.addAction("Hide from taskbar and Alt-Tab")
-        action.setCheckable(True)
+        toggle_action = menu.addAction("Hide from taskbar and Alt-Tab")
+        toggle_action.setCheckable(True)
         # membership, not the live style bit: a native tool window we never
         # touched must not be offered as "already hidden by us"
-        action.setChecked(TaskbarHider.is_tracked(hwnd))
+        toggle_action.setChecked(TaskbarHider.is_tracked(hwnd))
+        show_action = menu.addAction("Show window")
         menu.addAction("Ctrl+Alt+T toggles all marked windows").setEnabled(False)
-        if menu.exec_(self.list_widget.mapToGlobal(pos)) is None:
+        chosen = menu.exec_(self.list_widget.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == show_action:
+            self._show_window(item)
             return
         was_tracked = TaskbarHider.is_tracked(hwnd)
         if was_tracked:
@@ -500,6 +505,20 @@ class WindowHiderUI(QWidget):
             f"Back in the taskbar and Alt-Tab: {title}"
             if was_tracked
             else f"Removed from taskbar/Alt-Tab: {title}"
+        )
+
+    def _show_window(self, item: QListWidgetItem):
+        """Restores and focuses a window from the list (Show window menu).
+
+        A taskbar-hidden, minimized window has no system entry point back;
+        this is the only route that surfaces it again.
+        """
+        success, msg = TaskbarHider.show_window(item.data(HwndRole))
+        if not success:
+            self.status_label.setText(f"Show window failed: {msg}")
+            return
+        self.status_label.setText(
+            f"Shown: {_strip_taskbar_suffix(item.text())}"
         )
 
     def _mark_taskbar_hidden(self, item: QListWidgetItem, hidden: bool):

@@ -63,6 +63,12 @@ u32.RegisterHotKey.restype = wintypes.BOOL
 u32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
 u32.UnregisterHotKey.restype = wintypes.BOOL
 
+SW_RESTORE = 9
+u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+u32.ShowWindow.restype = wintypes.BOOL
+u32.SetForegroundWindow.argtypes = [wintypes.HWND]
+u32.SetForegroundWindow.restype = wintypes.BOOL
+
 
 class TaskbarHider:
     # global hotkey that flips taskbar hiding for every marked window
@@ -94,6 +100,24 @@ class TaskbarHider:
     @staticmethod
     def unregister_hotkey(hwnd: int, hotkey_id: int) -> bool:
         return bool(u32.UnregisterHotKey(hwnd, hotkey_id))
+
+    @staticmethod
+    def show_window(hwnd: int):
+        """Un-minimizes hwnd and brings it to the foreground.
+
+        A taskbar-hidden window that got minimized has no way back through
+        the system UI (no taskbar button, not in Alt-Tab, Win+D ignores
+        it), so the list menu offers this as the way back. Plain win32
+        calls on the foreign window, no injection.
+        """
+        if not u32.IsWindow(hwnd):
+            return False, "Window no longer exists."
+        u32.ShowWindow(hwnd, SW_RESTORE)
+        # foreground activation is privilege-restricted and may be denied;
+        # the restore above already brought the window back on screen, so
+        # a failure here only means focus stayed where it was
+        u32.SetForegroundWindow(hwnd)
+        return True, ""
 
     @staticmethod
     def _pid_of(hwnd: int) -> int:
