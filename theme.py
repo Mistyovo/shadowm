@@ -73,6 +73,47 @@ def _stylesheet() -> str:
         color: {DANGER};
         font-size: 8.5pt;
     }}
+    QLabel#appTitle {{
+        color: {TEXT};
+        font-size: 11.5pt;
+        font-weight: 600;
+    }}
+    QLabel#appSubtitle {{
+        color: {MUTED};
+        font-size: 8pt;
+    }}
+    QLabel#sectionLabel {{
+        color: {MUTED};
+        font-size: 8pt;
+        font-weight: 700;
+    }}
+    QFrame#card {{
+        background: {CARD};
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+    }}
+    QFrame#card QLabel, QFrame#card QCheckBox, QFrame#card QSlider {{
+        background: transparent;
+    }}
+    QLabel#pill {{
+        border-radius: 9px;
+        padding: 3px 10px;
+        font-size: 8pt;
+        font-weight: 600;
+        color: {MUTED};
+        background: rgba(148, 163, 184, 0.10);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+    }}
+    QLabel#pill[accent="good"] {{
+        color: {ACCENT};
+        background: rgba(34, 197, 94, 0.13);
+        border: 1px solid rgba(34, 197, 94, 0.35);
+    }}
+    QLabel#pill[accent="warn"] {{
+        color: #FBBF24;
+        background: rgba(245, 158, 11, 0.12);
+        border: 1px solid rgba(245, 158, 11, 0.30);
+    }}
     QListView#windowList {{
         background: {CARD};
         border: 1px solid rgba(255, 255, 255, 0.08);

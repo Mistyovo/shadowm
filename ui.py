@@ -1,3 +1,4 @@
+import ctypes
 import json
 import logging
 import os
@@ -5,25 +6,38 @@ import time
 from ctypes import wintypes
 from PyQt5.QtWidgets import (
     QApplication,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
     QCheckBox,
+    QFileIconProvider,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QMessageBox,
     QSlider,
-    QFileIconProvider,
+    QStyle,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QFileInfo
+from PyQt5.QtCore import (
+    QFileInfo,
+    QPointF,
+    QRect,
+    Qt,
+    QThread,
+    QTimer,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPalette, QPainter, QPen, QPixmap
 from capture_hider import WindowCaptureHider, get_window_pid, window_exists
 from ime_hider import ImeGuard
 from paths import state_file
 from session_state import SessionState
 from taskbar_hider import TaskbarHider
-from theme import apply as apply_theme
+from theme import ACCENT, BG, MUTED, TEXT, apply as apply_theme
 from window_opacity import WindowOpacity
 
 logger = logging.getLogger("shadowm")
@@ -77,6 +91,125 @@ class CaptureSafeMenu(QMenu):
     def showEvent(self, event):
         super().showEvent(event)
         WindowCaptureHider.set_window_hidden(int(self.winId()), True)
+
+
+def _is_elevated() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _load_logo_pixmap(size: int = 30) -> QPixmap:
+    """Header logo from assets/logo.svg, with a painted fallback."""
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "assets", "logo.svg"
+    )
+    pm = QPixmap(path)
+    if not pm.isNull():
+        return pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(ACCENT))
+    p.drawRoundedRect(1, 1, size - 2, size - 2, size * 0.28, size * 0.28)
+    pen = QPen(QColor(BG), max(2.0, size * 0.12))
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    m = size * 0.3
+    p.drawLine(QPointF(m, size / 2), QPointF(size / 2, size - m))
+    p.drawLine(QPointF(size / 2, size - m), QPointF(size - m, m))
+    p.end()
+    return pm
+
+
+class WindowItemDelegate(QStyledItemDelegate):
+    """Two-line rows: window title over its owning exe name.
+
+    Presentation only: the item text keeps the raw " [taskbar hidden]"
+    suffix that all logic depends on; the delegate strips it at paint
+    time and renders a styled chip instead.
+    """
+
+    _CHIP_TEXT = "taskbar"
+    _ROW_HEIGHT = 46
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(self._ROW_HEIGHT)
+        return size
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        full_text = opt.text
+        has_chip = full_text.endswith(TASKBAR_SUFFIX)
+        title = full_text[: -len(TASKBAR_SUFFIX)] if has_chip else full_text
+        opt.text = ""  # drawn manually below
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+
+        check_rect = style.subElementRect(QStyle.SE_ViewItemCheckIndicator, opt, widget)
+        deco_rect = style.subElementRect(QStyle.SE_ItemViewItemDecoration, opt, widget)
+        content_left = max(check_rect.right(), deco_rect.right()) + 8
+        rect = option.rect.adjusted(content_left - option.rect.left(), 0, -8, 0)
+
+        chip_font = QFont(option.font)
+        chip_font.setPointSizeF(7.5)
+        chip_font.setBold(True)
+        chip_width = 0
+        if has_chip:
+            chip_width = (
+                QFontMetrics(chip_font).horizontalAdvance(self._CHIP_TEXT) + 16
+            )
+
+        painter.save()
+        title_font = QFont(option.font)
+        title_font.setPointSize(9)
+        fm = QFontMetrics(title_font)
+        title = fm.elidedText(
+            title,
+            Qt.ElideRight,
+            max(20, rect.width() - chip_width - (8 if chip_width else 0)),
+        )
+        title_line = QRect(rect.left(), rect.top() + 8, rect.width(), fm.height())
+        painter.setFont(title_font)
+        painter.setPen(opt.palette.color(QPalette.Text))
+        painter.drawText(title_line, Qt.AlignVCenter, title)
+
+        sub_font = QFont(option.font)
+        sub_font.setPointSize(8)
+        sfm = QFontMetrics(sub_font)
+        exe_name = os.path.basename(index.data(ExeRole) or "") or "-"
+        sub_line = QRect(
+            rect.left(), title_line.bottom() + 3, rect.width(), sfm.height()
+        )
+        painter.setFont(sub_font)
+        painter.setPen(QColor(MUTED))
+        painter.drawText(
+            sub_line,
+            Qt.AlignVCenter,
+            sfm.elidedText(exe_name, Qt.ElideRight, rect.width()),
+        )
+
+        if has_chip:
+            chip_rect = QRect(
+                rect.right() - chip_width,
+                title_line.top() + (title_line.height() - 16) // 2,
+                chip_width,
+                16,
+            )
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QColor(34, 197, 94, 90))
+            painter.setBrush(QColor(34, 197, 94, 34))
+            painter.drawRoundedRect(chip_rect, 8, 8)
+            painter.setPen(QColor(ACCENT))
+            painter.setFont(chip_font)
+            painter.drawText(chip_rect, Qt.AlignCenter, self._CHIP_TEXT)
+        painter.restore()
 
 
 class WindowHiderUI(QWidget):
@@ -198,19 +331,85 @@ class WindowHiderUI(QWidget):
 
     def _init_window(self):
         self.setWindowTitle("ShadowM - Screen Capture Hider")
-        self.resize(460, 560)
+        self.resize(480, 640)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
-        self.auto_hide_checkbox = QCheckBox("Hide newly detected windows by default")
+
+        layout.addLayout(self._build_header())
+        layout.addWidget(self._build_settings_card())
+        layout.addLayout(self._build_list_header())
+
+        self.list_widget = QListWidget()
+        self.list_widget.setObjectName("windowList")
+        self.list_widget.setItemDelegate(WindowItemDelegate(self.list_widget))
+        self.list_widget.itemChanged.connect(self.on_item_changed)
+        self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.list_widget.currentItemChanged.connect(self.on_current_item_changed)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(
+            self.on_list_context_menu
+        )
+        layout.addWidget(self.list_widget, 1)
+
+        layout.addWidget(self._build_opacity_card())
+        layout.addWidget(
+            QLabel(
+                "Right-click a window for taskbar / Alt-Tab options · "
+                "Ctrl+Alt+T toggles every marked window",
+                objectName="caption",
+            )
+        )
+
+        # persistent (never overwritten) so the user cannot miss it
+        self.hotkey_warning_label = QLabel("", objectName="warning")
+        self.hotkey_warning_label.setWordWrap(True)
+        layout.addWidget(self.hotkey_warning_label)
+
+        self.status_label = QLabel("", objectName="status")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+    def _build_header(self):
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        logo = QLabel()
+        logo.setPixmap(_load_logo_pixmap(30))
+        header.addWidget(logo)
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        titles.addWidget(QLabel("ShadowM", objectName="appTitle"))
+        titles.addWidget(QLabel("Screen capture hider", objectName="appSubtitle"))
+        header.addLayout(titles)
+        header.addStretch()
+
+        self.hidden_pill = QLabel("", objectName="pill")
+        self.admin_pill = QLabel("", objectName="pill")
+        if _is_elevated():
+            self.admin_pill.setText("Admin")
+            self._set_pill_accent(self.admin_pill, "good")
+        else:
+            self.admin_pill.setText("Not elevated")
+            self._set_pill_accent(self.admin_pill, "warn")
+        header.addWidget(self.hidden_pill)
+        header.addWidget(self.admin_pill)
+        return header
+
+    def _build_settings_card(self):
+        card = QFrame(objectName="card")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(12, 10, 12, 10)
+        box.setSpacing(4)
+
+        self.auto_hide_checkbox = QCheckBox(
+            "Hide newly detected windows by default"
+        )
         self.auto_hide_checkbox.setToolTip(
             "When checked, every window that appears in the list below is "
             "automatically hidden from screen capture."
         )
-        layout.addWidget(self.auto_hide_checkbox)
-
         self.ime_guard_checkbox = QCheckBox(
             "Also hide the IME candidate box while typing in hidden windows"
         )
@@ -223,29 +422,30 @@ class WindowHiderUI(QWidget):
             "returns to a normal window."
         )
         self.ime_guard_checkbox.toggled.connect(self.ime_guard.set_enabled)
-        layout.addWidget(self.ime_guard_checkbox)
 
-        layout.addWidget(
-            QLabel(
-                "Check the windows below to hide them from screen capture "
-                "(right-click one for taskbar / Alt-Tab options):",
-                objectName="caption",
-            )
-        )
+        box.addWidget(self.auto_hide_checkbox)
+        box.addWidget(self.ime_guard_checkbox)
+        return card
 
-        self.list_widget = QListWidget()
-        self.list_widget.setObjectName("windowList")
-        self.list_widget.itemChanged.connect(self.on_item_changed)
-        self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
-        self.list_widget.currentItemChanged.connect(self.on_current_item_changed)
-        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.list_widget.customContextMenuRequested.connect(
-            self.on_list_context_menu
-        )
-        layout.addWidget(self.list_widget)
+    def _build_list_header(self):
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        section = QLabel("WINDOWS", objectName="sectionLabel")
+        font = section.font()
+        font.setLetterSpacing(QFont.AbsoluteSpacing, 1.2)
+        section.setFont(font)
+        row.addWidget(section)
+        row.addStretch()
+        self.window_count_label = QLabel("", objectName="caption")
+        row.addWidget(self.window_count_label)
+        return row
 
-        opacity_row = QHBoxLayout()
-        opacity_row.addWidget(QLabel("Opacity:"))
+    def _build_opacity_card(self):
+        card = QFrame(objectName="card")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(10)
+        row.addWidget(QLabel("Opacity", objectName="caption"))
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(1, 100)
         self.opacity_slider.setValue(100)
@@ -256,19 +456,32 @@ class WindowHiderUI(QWidget):
             "from capture is controlled by its checkbox above."
         )
         self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
-        opacity_row.addWidget(self.opacity_slider)
-        self.opacity_value_label = QLabel("100%")
-        opacity_row.addWidget(self.opacity_value_label)
-        layout.addLayout(opacity_row)
+        row.addWidget(self.opacity_slider, 1)
+        self.opacity_value_label = QLabel("100%", objectName="caption")
+        row.addWidget(self.opacity_value_label)
+        return card
 
-        # persistent (never overwritten) so the user cannot miss it
-        self.hotkey_warning_label = QLabel("", objectName="warning")
-        self.hotkey_warning_label.setWordWrap(True)
-        layout.addWidget(self.hotkey_warning_label)
+    @staticmethod
+    def _set_pill_accent(label, accent):
+        """Switches a pill's [accent=...] style; needs a style re-polish."""
+        label.setProperty("accent", accent or "")
+        label.style().unpolish(label)
+        label.style().polish(label)
 
-        self.status_label = QLabel("", objectName="status")
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+    def _update_counts(self):
+        """Refreshes the header pill and list-header count."""
+        own_hwnd = int(self.winId())
+        total = hidden = 0
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.data(HwndRole) == own_hwnd:
+                continue
+            total += 1
+            if item.checkState() == Qt.Checked:
+                hidden += 1
+        self.window_count_label.setText(f"{total} windows")
+        self.hidden_pill.setText(f"{hidden} hidden")
+        self._set_pill_accent(self.hidden_pill, "good" if hidden else None)
 
     @staticmethod
     def _guarded(slot):
@@ -343,6 +556,7 @@ class WindowHiderUI(QWidget):
         self._add_new_items(current_hwnds)
         self._is_updating = False
         self._reconcile_hidden_state()
+        self._update_counts()
 
     def _reconcile_hidden_state(self):
         """Re-applies hiding to checked windows that lost their affinity.
