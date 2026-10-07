@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('assets/check.svg', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

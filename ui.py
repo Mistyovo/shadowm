@@ -4,6 +4,7 @@ import os
 import time
 from ctypes import wintypes
 from PyQt5.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -22,6 +23,7 @@ from ime_hider import ImeGuard
 from paths import state_file
 from session_state import SessionState
 from taskbar_hider import TaskbarHider
+from theme import apply as apply_theme
 from window_opacity import WindowOpacity
 
 logger = logging.getLogger("shadowm")
@@ -80,6 +82,7 @@ class CaptureSafeMenu(QMenu):
 class WindowHiderUI(QWidget):
     def __init__(self):
         super().__init__()
+        apply_theme(QApplication.instance())
         self._is_updating = False
         self._is_syncing_opacity = False
         self.workers = {}
@@ -195,10 +198,12 @@ class WindowHiderUI(QWidget):
 
     def _init_window(self):
         self.setWindowTitle("ShadowM - Screen Capture Hider")
-        self.resize(400, 300)
+        self.resize(460, 560)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
         self.auto_hide_checkbox = QCheckBox("Hide newly detected windows by default")
         self.auto_hide_checkbox.setToolTip(
             "When checked, every window that appears in the list below is "
@@ -223,11 +228,13 @@ class WindowHiderUI(QWidget):
         layout.addWidget(
             QLabel(
                 "Check the windows below to hide them from screen capture "
-                "(right-click one for taskbar / Alt-Tab options):"
+                "(right-click one for taskbar / Alt-Tab options):",
+                objectName="caption",
             )
         )
 
         self.list_widget = QListWidget()
+        self.list_widget.setObjectName("windowList")
         self.list_widget.itemChanged.connect(self.on_item_changed)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.list_widget.currentItemChanged.connect(self.on_current_item_changed)
@@ -255,12 +262,11 @@ class WindowHiderUI(QWidget):
         layout.addLayout(opacity_row)
 
         # persistent (never overwritten) so the user cannot miss it
-        self.hotkey_warning_label = QLabel("")
+        self.hotkey_warning_label = QLabel("", objectName="warning")
         self.hotkey_warning_label.setWordWrap(True)
-        self.hotkey_warning_label.setStyleSheet("color: #b34040;")
         layout.addWidget(self.hotkey_warning_label)
 
-        self.status_label = QLabel("")
+        self.status_label = QLabel("", objectName="status")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 

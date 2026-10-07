@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from capture_hider import k32
 from paths import migrate_legacy_files, state_file
+from theme import apply as apply_theme
 from ui import WindowHiderUI, CaptureSafeMessageBox
 
 MUTEX_NAME = "ShadowM.SingleInstance"
@@ -76,6 +77,7 @@ def main():
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
+    apply_theme(app)  # also skins the startup dialogs shown before the UI
 
     mutex = acquire_single_instance_mutex()
     if mutex is None:
