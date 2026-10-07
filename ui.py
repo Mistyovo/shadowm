@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QFileIconProvider,
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QFileInfo
-from capture_hider import WindowCaptureHider
+from capture_hider import WindowCaptureHider, get_window_pid, window_exists
 from ime_hider import ImeGuard
 from paths import state_file
 from session_state import SessionState
@@ -154,7 +154,7 @@ class WindowHiderUI(QWidget):
             return (
                 TaskbarHider.is_window(hwnd)
                 and pid is not None
-                and WindowCaptureHider.get_window_pid(hwnd) == pid
+                and get_window_pid(hwnd) == pid
             )
 
         for hwnd, info in self.session.taskbar_items():
@@ -264,11 +264,31 @@ class WindowHiderUI(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
+    @staticmethod
+    def _guarded(slot):
+        """Wraps a periodic slot so an exception degrades to a log entry.
+
+        PyQt5 aborts the whole process (qFatal, 0xC0000409) when an
+        exception escapes a slot invoked from C++, so no bug in a
+        periodic path may ever reach the event loop uncaught.
+        """
+
+        def wrapper(*args):
+            try:
+                return slot(*args)
+            except Exception:
+                logger.exception(
+                    "periodic callback failed: %s",
+                    getattr(slot, "__name__", slot),
+                )
+
+        return wrapper
+
     def _setup_timer(self):
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_window_list)
-        self.timer.timeout.connect(self.ime_guard.refresh)
-        self.timer.timeout.connect(TaskbarHider.reconcile)
+        self.timer.timeout.connect(self._guarded(self.update_window_list))
+        self.timer.timeout.connect(self._guarded(self.ime_guard.refresh))
+        self.timer.timeout.connect(self._guarded(TaskbarHider.reconcile))
         self.ime_guard.refresh()
         self.update_window_list()
         self.timer.start(1500)
@@ -331,7 +351,7 @@ class WindowHiderUI(QWidget):
             hwnd = item.data(HwndRole)
             if item.checkState() != Qt.Checked or hwnd in self.workers:
                 continue
-            if not WindowCaptureHider.window_exists(hwnd):
+            if not window_exists(hwnd):
                 continue
             if self._hide_failures.get(hwnd, 0) >= self._max_hide_failures:
                 continue
@@ -375,7 +395,7 @@ class WindowHiderUI(QWidget):
                         _strip_taskbar_suffix(item.text()),
                     )
                 self.list_widget.takeItem(i)
-                if not WindowCaptureHider.window_exists(hwnd):
+                if not window_exists(hwnd):
                     # truly gone: drop our bookkeeping for good
                     WindowOpacity.restore(hwnd)
                     TaskbarHider.forget(hwnd)

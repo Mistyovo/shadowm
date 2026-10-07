@@ -1,5 +1,7 @@
 """Pure-logic tests: no windows, no Qt event loop needed."""
 
+import ast
+import inspect
 import json
 import os
 import shutil
@@ -10,11 +12,15 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import capture_hider
+import taskbar_hider
+import window_opacity
 from capture_hider import k32
 from paths import migrate_legacy_files, state_dir
 from session_state import SessionState, boot_marker
 from ui import TASKBAR_SUFFIX, _strip_taskbar_suffix
 import main as main_module
+import ui
 
 
 class SuffixTests(unittest.TestCase):
@@ -88,6 +94,36 @@ class SessionStateTests(unittest.TestCase):
         self.assertTrue(os.path.exists(self.path))
         state.delete()
         self.assertFalse(os.path.exists(self.path))
+
+
+class StaticApiUsageTests(unittest.TestCase):
+    """ui.py calls hider classes by name; a typo'd attribute only blows up
+    at runtime - and PyQt5 then aborts the whole process. Catch the class
+    of bug statically (e.g. WindowCaptureHider.window_exists never existed
+    as a classmethod and crashed every run ~1.5s in)."""
+
+    CLASSES = {
+        "WindowCaptureHider": capture_hider.WindowCaptureHider,
+        "TaskbarHider": taskbar_hider.TaskbarHider,
+        "WindowOpacity": window_opacity.WindowOpacity,
+    }
+
+    def test_ui_calls_only_existing_attributes(self):
+        tree = ast.parse(inspect.getsource(ui))
+        pairs = {
+            (node.func.value.id, node.func.attr)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in self.CLASSES
+        }
+        self.assertTrue(pairs)  # the scan itself must find something
+        for cls_name, attr in sorted(pairs):
+            self.assertTrue(
+                hasattr(self.CLASSES[cls_name], attr),
+                f"ui.py calls {cls_name}.{attr} which does not exist",
+            )
 
 
 class SingleInstanceTests(unittest.TestCase):
