@@ -1,11 +1,11 @@
 """Session file: per-window state ShadowM must be able to undo after a crash.
 
-The file lives next to the script (shadowm_session.json) and records, for
-every window this run modified, the original state needed to undo it:
-capture affinity (WDA), taskbar extended styles and layered-window opacity.
-A boot marker (wall-clock time minus GetTickCount64, constant within one
-boot) makes entries from before a reboot untrusted, since window handles
-never survive a restart.
+The file lives in the per-user state dir (shadowm_session.json, see
+paths.py) and records, for every window this run modified, the original
+state needed to undo it: capture affinity (WDA), taskbar extended
+styles and layered-window opacity. A boot marker (wall-clock time minus
+GetTickCount64, constant within one boot) makes entries from before a
+reboot untrusted, since window handles never survive a restart.
 
 On a normal exit everything is restored and the file deleted; after a crash,
 the next launch heals whatever is still alive.

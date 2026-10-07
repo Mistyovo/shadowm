@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QFileInfo
 from capture_hider import WindowCaptureHider
 from ime_hider import ImeGuard
+from paths import state_file
 from session_state import SessionState
 from taskbar_hider import TaskbarHider
 from window_opacity import WindowOpacity
@@ -86,13 +87,12 @@ class WindowHiderUI(QWidget):
         self._max_hide_failures = 3
         self.icon_provider = QFileIconProvider()
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self._remembered_file = os.path.join(base_dir, "remembered_hidden.json")
+        self._remembered_file = state_file("remembered_hidden.json")
         self._remembered = self._load_remembered()
 
         # crash recovery: whatever a previous run left on windows is undone
         # here, before any new hiding happens
-        self.session = SessionState(os.path.join(base_dir, "shadowm_session.json"))
+        self.session = SessionState(state_file("shadowm_session.json"))
         TaskbarHider.set_session(self.session)
         WindowOpacity.set_session(self.session)
         self._heal_session_leftovers()

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from capture_hider import k32
+from paths import migrate_legacy_files, state_dir
 from session_state import SessionState, boot_marker
 from ui import TASKBAR_SUFFIX, _strip_taskbar_suffix
 import main as main_module
@@ -94,6 +96,83 @@ class SingleInstanceTests(unittest.TestCase):
         first = main_module.acquire_single_instance_mutex(name)
         self.assertIsNotNone(first)
         self.assertIsNone(main_module.acquire_single_instance_mutex(name))
+
+
+class StateDirTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _set_appdata(self):
+        old = os.environ.get("APPDATA")
+        os.environ["APPDATA"] = self.tmp
+
+        def restore():
+            if old is None:
+                os.environ.pop("APPDATA", None)
+            else:
+                os.environ["APPDATA"] = old
+
+        self.addCleanup(restore)
+
+    def test_state_dir_under_appdata(self):
+        self._set_appdata()
+        self.assertEqual(state_dir(), os.path.join(self.tmp, "ShadowM"))
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "ShadowM")))
+
+
+class LegacyStateMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.legacy = os.path.join(self.tmp, "legacy")
+        self.target = os.path.join(self.tmp, "state")
+        os.makedirs(self.legacy)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_legacy(self):
+        src = os.path.join(self.legacy, "remembered_hidden.json")
+        with open(src, "w", encoding="utf-8") as f:
+            json.dump({"C:/x/a.exe": {"title": "A", "ts": 1}}, f)
+        return src
+
+    def test_moves_file_into_target(self):
+        src = self._write_legacy()
+        moved = migrate_legacy_files(
+            target_dir=self.target, legacy_dirs=[self.legacy]
+        )
+        self.assertEqual(moved, ["remembered_hidden.json"])
+        self.assertFalse(os.path.exists(src))
+        with open(
+            os.path.join(self.target, "remembered_hidden.json"),
+            encoding="utf-8",
+        ) as f:
+            self.assertIn("a.exe", f.read())
+
+    def test_existing_target_not_overwritten(self):
+        self._write_legacy()
+        os.makedirs(self.target)
+        with open(
+            os.path.join(self.target, "remembered_hidden.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write("{}")
+        moved = migrate_legacy_files(
+            target_dir=self.target, legacy_dirs=[self.legacy]
+        )
+        self.assertEqual(moved, [])
+        # the legacy copy stays for manual recovery
+        self.assertTrue(os.path.exists(os.path.join(self.legacy, "remembered_hidden.json")))
+
+    def test_no_legacy_file_is_noop(self):
+        moved = migrate_legacy_files(
+            target_dir=self.target, legacy_dirs=[self.legacy]
+        )
+        self.assertEqual(moved, [])
 
 
 if __name__ == "__main__":

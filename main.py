@@ -9,6 +9,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from capture_hider import k32
+from paths import migrate_legacy_files, state_file
 from ui import WindowHiderUI, CaptureSafeMessageBox
 
 MUTEX_NAME = "ShadowM.SingleInstance"
@@ -39,13 +40,12 @@ def is_admin() -> bool:
 
 
 def setup_logging():
-    """Logs lifecycle events to shadowm.log next to the script (exe names
-    only - window titles are never written, they can be private)."""
+    """Logs lifecycle events to shadowm.log in the per-user state dir
+    (exe names only - window titles are never written, they can be
+    private)."""
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    log_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "shadowm.log"
-    )
+    log_path = state_file("shadowm.log")
     try:
         handler = logging.handlers.RotatingFileHandler(
             log_path, maxBytes=256 * 1024, backupCount=1, encoding="utf-8"
@@ -70,6 +70,8 @@ def _warn_box(text: str, informative: str = ""):
 
 def main():
     setup_logging()
+    for name in migrate_legacy_files():
+        logger.info("migrated %s into the state dir", name)
     # must be set before QApplication is constructed
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
