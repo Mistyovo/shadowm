@@ -29,7 +29,7 @@ To successfully inject code into third-party windows, the following strict condi
 3. Only hides 64-bit target applications (cross-architecture hiding to 32-bit targets is blocked by WOW64 restrictions).
 
 ## Installation
-Ensure you have a 64-bit Python 3 installation.
+Either download the packaged `ShadowM.exe` from [Releases](../../releases) (self-contained, no Python needed), or run from source with a 64-bit Python 3 installation:
 ```sh
 pip install -r requirements.txt
 ```
@@ -45,7 +45,7 @@ Toggle the checkbox next to any window to make it immediately invisible to OBS c
 
 Notes:
 - Only one ShadowM instance may run at a time; a second launch tells you and exits.
-- Lifecycle events (hide/restore results, crash healing) are written to `shadowm.log` next to the script. Only executable names are logged, never window titles.
+- State lives in `%APPDATA%\ShadowM`: the remembered-hidden rules, the crash-recovery session file and `shadowm.log` (only executable names are logged, never window titles). Runs from source and packaged builds share this directory; a legacy `remembered_hidden.json` next to the script/exe is migrated there automatically.
 
 ## Exit Behavior and Crash Recovery
 On a normal exit (after the confirmation dialog) ShadowM undoes every change it made: capture exclusion, taskbar/Alt-Tab styles, opacity and IME candidate protection. Windows hidden but no longer listed (e.g. minimized to the tray) are restored too.
@@ -101,7 +101,14 @@ Notes:
 pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
-The test suite covers the pure logic (session state, remembered rules helpers, single-instance mutex) and exercises the Win32 roundtrips (capture affinity, taskbar styles, layered opacity) against real windows created by the test process.
+The test suite covers the pure logic (session state, remembered rules helpers, single-instance mutex, state-dir migration) and exercises the Win32 roundtrips (capture affinity, taskbar styles, layered opacity) against real windows created by the test process.
+
+### Building the packaged exe
+```sh
+pip install pyinstaller
+python -m PyInstaller ShadowM.spec
+```
+produces `dist/ShadowM.exe` (onefile, windowed). Rebuild via the spec so name/flags stay consistent; `build/` and `dist/` are not committed.
 
 ## Disclaimer
 This tool uses techniques typically employed by debugging and reverse engineering software (Read/Write Process Memory). Some aggressive Antivirus solutions might falsely flag the `CreateRemoteThread` action.
