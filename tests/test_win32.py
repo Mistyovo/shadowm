@@ -81,6 +81,7 @@ u32.IsIconic.argtypes = [wintypes.HWND]
 u32.IsIconic.restype = wintypes.BOOL
 
 WS_OVERLAPPEDWINDOW = 0x00CF0000
+WS_POPUP = 0x80000000
 SW_SHOWNOACTIVATE = 4
 SW_MINIMIZE = 6
 
@@ -92,7 +93,7 @@ def _wnd_proc(hwnd, msg, wparam, lparam):
 _WND_PROC = WNDPROC(_wnd_proc)  # keep the trampoline alive for the class
 
 
-def make_window(exstyle=0, title=None, visible=False):
+def make_window(exstyle=0, title=None, visible=False, style=WS_OVERLAPPEDWINDOW):
     """Creates a real top-level window owned by the test process."""
     hinst = k32.GetModuleHandleW(None)
     name = f"ShadowMTest_{uuid.uuid4().hex[:8]}"
@@ -106,7 +107,7 @@ def make_window(exstyle=0, title=None, visible=False):
         exstyle,
         name,
         title or name,
-        WS_OVERLAPPEDWINDOW,
+        style,
         100,
         100,
         300,
@@ -276,6 +277,39 @@ class WindowOpacityTests(unittest.TestCase):
         destroy_window(hwnd, name, hinst)
         ok, _ = WindowOpacity.restore(hwnd)
         self.assertTrue(ok)
+
+
+class ZeroExStyleTests(unittest.TestCase):
+    """SetWindowLongPtrW returns the previous style; a previous style of
+    exactly 0 must not be mistaken for a failed call."""
+
+    def test_taskbar_roundtrip_on_zero_exstyle(self):
+        hwnd, name, hinst = make_window(style=WS_POPUP)
+        try:
+            self.assertEqual(exstyle_of(hwnd), 0)
+            ok, msg = TaskbarHider.hide(hwnd)
+            self.assertTrue(ok, msg)
+            self.assertTrue(TaskbarHider.is_hidden(hwnd))
+            ok, msg = TaskbarHider.restore(hwnd)
+            self.assertTrue(ok, msg)
+            self.assertEqual(exstyle_of(hwnd), 0)
+        finally:
+            TaskbarHider.forget(hwnd)
+            destroy_window(hwnd, name, hinst)
+
+    def test_opacity_roundtrip_on_zero_exstyle(self):
+        hwnd, name, hinst = make_window(style=WS_POPUP)
+        try:
+            self.assertEqual(exstyle_of(hwnd), 0)
+            ok, msg = WindowOpacity.set_opacity(hwnd, 50)
+            self.assertTrue(ok, msg)
+            self.assertEqual(WindowOpacity.get_percent(hwnd), 50)
+            ok, msg = WindowOpacity.restore(hwnd)
+            self.assertTrue(ok, msg)
+            self.assertEqual(exstyle_of(hwnd), 0)
+        finally:
+            WindowOpacity.restore(hwnd)
+            destroy_window(hwnd, name, hinst)
 
 
 class WindowEnumerationTests(unittest.TestCase):

@@ -1,13 +1,14 @@
 import ctypes
+import functools
 import json
 import logging
 import os
 import time
 from ctypes import wintypes
 from PyQt5.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QFileIconProvider,
     QFrame,
     QHBoxLayout,
@@ -16,6 +17,7 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QSizePolicy,
     QSlider,
     QStyle,
     QStyleOptionViewItem,
@@ -24,14 +26,18 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from PyQt5.QtCore import (
+    QEasingCurve,
     QEvent,
     QFileInfo,
+    QPropertyAnimation,
     QRect,
     QRectF,
     QSize,
     Qt,
     QThread,
     QTimer,
+    QVariantAnimation,
+    pyqtProperty,
     pyqtSignal,
 )
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPen, QPixmap
@@ -43,9 +49,9 @@ from taskbar_hider import TaskbarHider
 from theme import (
     BG,
     BLUE,
+    BLUE_WASH,
     INK,
     LINE,
-    LINE_STRONG,
     MUTED,
     SLATE,
     SLATE_WASH,
@@ -72,6 +78,204 @@ def _strip_taskbar_suffix(text: str) -> str:
     return text[: -len(TASKBAR_SUFFIX)] if text.endswith(TASKBAR_SUFFIX) else text
 
 
+def _safe(fn):
+    """Wraps a method PyQt5 invokes from C++ so an unexpected exception
+    degrades to a log entry instead of aborting the whole process.
+
+    PyQt5 terminates the process (qFatal, 0xC0000409) when an exception
+    escapes a slot, a paint override or a mouse/event handler; no bug in
+    any such callback may ever reach C++ uncaught.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            logger.exception(
+                "uncaught error in %s", getattr(fn, "__name__", fn)
+            )
+
+    return wrapper
+
+
+def _system_animations_enabled() -> bool:
+    """Respect Windows' "Show animations" accessibility setting."""
+    try:
+        enabled = ctypes.c_int(1)
+        ctypes.windll.user32.SystemParametersInfoW(
+            0x1042, 0, ctypes.byref(enabled), 0
+        )
+        return bool(enabled.value)
+    except Exception:
+        return True
+
+
+ANIMATIONS = _system_animations_enabled()
+
+_SWITCH_W = 36
+_SWITCH_H = 20
+_SWITCH_OFF_TRACK = "#E4E9F2"
+_SWITCH_OFF_BORDER = "#CBD5E3"
+
+
+def _mix(c1, c2, t: float) -> QColor:
+    """Linear RGB blend between two colours, t clamped to 0..1."""
+    a, b = QColor(c1), QColor(c2)
+    t = max(0.0, min(1.0, t))
+    return QColor(
+        round(a.red() + (b.red() - a.red()) * t),
+        round(a.green() + (b.green() - a.green()) * t),
+        round(a.blue() + (b.blue() - a.blue()) * t),
+    )
+
+
+def _paint_toggle(painter, rect, t, hovered=False, focused=False):
+    """Shared switch rendering: track eases off->blue, knob slides."""
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing)
+    if hovered or focused:
+        ring = QColor(BLUE)
+        ring.setAlpha(90 if focused else 55)
+        painter.setPen(QPen(ring, 1.3))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(
+            QRectF(rect).adjusted(-2.5, -2.5, 2.5, 2.5),
+            rect.height() / 2 + 2.5,
+            rect.height() / 2 + 2.5,
+        )
+    track = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(_mix(_SWITCH_OFF_TRACK, BLUE, t))
+    radius = track.height() / 2
+    painter.drawRoundedRect(track, radius, radius)
+    knob_x = rect.left() + 2 + t * (rect.width() - 20)
+    knob = QRectF(knob_x, rect.top() + 2, 16, 16)
+    painter.setPen(QPen(_mix(_SWITCH_OFF_BORDER, "#FFFFFF", t), 1))
+    painter.setBrush(QColor("#FFFFFF"))
+    painter.drawEllipse(knob)
+    painter.restore()
+
+
+def _fade_in(widget, duration=140):
+    """Softens a popup/dialog's first frame."""
+    if not ANIMATIONS:
+        return
+    widget.setWindowOpacity(0.0)
+    anim = QPropertyAnimation(widget, b"windowOpacity", widget)
+    anim.setDuration(duration)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(QEasingCurve.OutCubic)
+    anim.start()
+    widget._fade_anim = anim
+
+
+class ToggleSwitch(QAbstractButton):
+    """Checkable row that paints its own sliding switch and label.
+
+    Unlike a QSS-styled QCheckBox the knob glides and the track colour
+    eases between states, so toggling never snaps.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self.setText(text)
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setObjectName("toggleSwitch")
+        self._pos = 0.0
+        self._hover = 0.0
+        self._pos_anim = QPropertyAnimation(self, b"knobPosition", self)
+        self._pos_anim.setDuration(180 if ANIMATIONS else 0)
+        self._pos_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._hover_anim = QPropertyAnimation(self, b"hoverRatio", self)
+        self._hover_anim.setDuration(120 if ANIMATIONS else 0)
+        self._hover_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.toggled.connect(self._animate_toggle)
+
+    def _animate_toggle(self, checked):
+        target = 1.0 if checked else 0.0
+        if not ANIMATIONS or not self.isVisible():
+            self._pos_anim.stop()
+            self.knobPosition = target
+            return
+        self._pos_anim.stop()
+        self._pos_anim.setStartValue(self._pos)
+        self._pos_anim.setEndValue(target)
+        self._pos_anim.start()
+
+    def get_knob_position(self):
+        return self._pos
+
+    def set_knob_position(self, value):
+        self._pos = float(value)
+        self.update()
+
+    knobPosition = pyqtProperty(float, get_knob_position, set_knob_position)
+
+    def get_hover_ratio(self):
+        return self._hover
+
+    def set_hover_ratio(self, value):
+        self._hover = float(value)
+        self.update()
+
+    hoverRatio = pyqtProperty(float, get_hover_ratio, set_hover_ratio)
+
+    def enterEvent(self, event):
+        self._hover_anim.stop()
+        self._hover_anim.setStartValue(self._hover)
+        self._hover_anim.setEndValue(1.0)
+        self._hover_anim.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_anim.stop()
+        self._hover_anim.setStartValue(self._hover)
+        self._hover_anim.setEndValue(0.0)
+        self._hover_anim.start()
+        super().leaveEvent(event)
+
+    def sizeHint(self):
+        fm = QFontMetrics(self.font())
+        return QSize(
+            _SWITCH_W + 18 + fm.horizontalAdvance(self.text()) + 4,
+            max(30, fm.height() + 8),
+        )
+
+    @_safe
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        top = (self.height() - _SWITCH_H) // 2
+        # 3px breathing room keeps the hover/focus ring inside the widget
+        track = QRect(3, top, _SWITCH_W, _SWITCH_H)
+        _paint_toggle(
+            painter,
+            track,
+            self._pos,
+            hovered=self._hover > 0.02,
+            focused=self.hasFocus(),
+        )
+        painter.setFont(self.font())
+        painter.setPen(QColor(INK if self.isEnabled() else MUTED))
+        text_rect = QRect(
+            3 + _SWITCH_W + 11,
+            0,
+            max(0, self.width() - 3 - _SWITCH_W - 11),
+            self.height(),
+        )
+        fm = QFontMetrics(self.font())
+        painter.drawText(
+            text_rect,
+            Qt.AlignVCenter | Qt.AlignLeft,
+            fm.elidedText(self.text(), Qt.ElideRight, text_rect.width()),
+        )
+
+
 class HideWorker(QThread):
     finished = pyqtSignal(object, bool, bool, str)
 
@@ -95,17 +299,21 @@ class CaptureSafeMessageBox(QMessageBox):
     paints its first frame, so it never leaks into a capture.
     """
 
+    @_safe
     def showEvent(self, event):
         super().showEvent(event)
         WindowCaptureHider.set_window_hidden(int(self.winId()), True)
+        _fade_in(self, 140)
 
 
 class CaptureSafeMenu(QMenu):
     """Context menu that is itself excluded from screen capture."""
 
+    @_safe
     def showEvent(self, event):
         super().showEvent(event)
         WindowCaptureHider.set_window_hidden(int(self.winId()), True)
+        _fade_in(self, 100)
 
 
 def _is_elevated() -> bool:
@@ -116,7 +324,7 @@ def _is_elevated() -> bool:
 
 
 def _style_native_frame(hwnd):
-    """Paints the Windows title bar in the app's warm paper palette.
+    """Paints the Windows title bar in the app's white-blue palette.
 
     DWMWA_CAPTION_COLOR (35) / DWMWA_TEXT_COLOR (36) exist on Win11 22000+;
     older systems silently keep their default chrome.
@@ -194,6 +402,131 @@ class WindowItemDelegate(QStyledItemDelegate):
     _SWITCH_H = 20
     _RIGHT_PAD = 12
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._switch_pos = {}
+        self._switch_anims = {}
+        self._appear = {}
+        self._appear_anims = {}
+        self._sel = {}
+        self._sel_anims = {}
+
+    def forget(self, key):
+        """Drops animation state for a row that left the list."""
+        for store in (self._switch_pos, self._appear, self._sel):
+            store.pop(key, None)
+        for store in (self._switch_anims, self._appear_anims, self._sel_anims):
+            anim = store.pop(key, None)
+            if anim is not None:
+                anim.stop()
+
+    def _animated_switch(self, key, target, view):
+        """Eases a row's switch towards its new state; returns the value
+        to paint right now (animations keep repainting via valueChanged)."""
+        pos = self._switch_pos.get(key)
+        if pos is None:
+            self._switch_pos[key] = target
+            return target
+        if abs(pos - target) < 1e-4:
+            return pos
+        anim = self._switch_anims.get(key)
+        if (
+            anim is not None
+            and anim.endValue() is not None
+            and abs(float(anim.endValue()) - target) < 1e-4
+        ):
+            return pos
+        if anim is not None:
+            anim.stop()
+        if not ANIMATIONS:
+            self._switch_pos[key] = target
+            return target
+        anim = QVariantAnimation(self)
+        anim.setStartValue(pos)
+        anim.setEndValue(float(target))
+        anim.setDuration(180)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def update(value, key=key, view=view):
+            self._switch_pos[key] = float(value)
+            if view is not None:
+                view.viewport().update()
+
+        anim.valueChanged.connect(update)
+        anim.finished.connect(
+            lambda key=key: self._switch_anims.pop(key, None)
+        )
+        self._switch_anims[key] = anim
+        anim.start()
+        return pos
+
+    def _appearance(self, key, view):
+        """Fades a row in the first time it is painted."""
+        alpha = self._appear.get(key)
+        if alpha is not None:
+            return alpha
+        if not ANIMATIONS:
+            self._appear[key] = 1.0
+            return 1.0
+        self._appear[key] = 0.0
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(200)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def update(value, key=key, view=view):
+            self._appear[key] = float(value)
+            if view is not None:
+                view.viewport().update()
+
+        anim.valueChanged.connect(update)
+        anim.finished.connect(
+            lambda key=key: self._appear_anims.pop(key, None)
+        )
+        self._appear_anims[key] = anim
+        anim.start()
+        return 0.0
+
+    def _animated_selection(self, key, target, view):
+        """Cross-fades the selected-row wash instead of hard-switching it."""
+        value = self._sel.get(key)
+        if value is None:
+            self._sel[key] = target
+            return target
+        if abs(value - target) < 1e-4:
+            return value
+        anim = self._sel_anims.get(key)
+        if (
+            anim is not None
+            and anim.endValue() is not None
+            and abs(float(anim.endValue()) - target) < 1e-4
+        ):
+            return value
+        if anim is not None:
+            anim.stop()
+        if not ANIMATIONS:
+            self._sel[key] = target
+            return target
+        anim = QVariantAnimation(self)
+        anim.setStartValue(value)
+        anim.setEndValue(float(target))
+        anim.setDuration(140)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def update(v, key=key, view=view):
+            self._sel[key] = float(v)
+            if view is not None:
+                view.viewport().update()
+
+        anim.valueChanged.connect(update)
+        anim.finished.connect(
+            lambda key=key: self._sel_anims.pop(key, None)
+        )
+        self._sel_anims[key] = anim
+        anim.start()
+        return value
+
     @classmethod
     def switch_rect(cls, item_rect: QRect) -> QRect:
         x = item_rect.right() - cls._RIGHT_PAD - cls._SWITCH_W
@@ -218,6 +551,7 @@ class WindowItemDelegate(QStyledItemDelegate):
             return False
         return super().editorEvent(event, model, option, index)
 
+    @_safe
     def paint(self, painter, option, index):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
@@ -228,8 +562,25 @@ class WindowItemDelegate(QStyledItemDelegate):
         opt.text = ""  # drawn manually below
         opt.features = opt.features & ~QStyleOptionViewItem.HasCheckIndicator
         widget = opt.widget
+        key = index.data(HwndRole)
         style = widget.style() if widget is not None else QApplication.style()
-        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+
+        if key is not None and widget is not None:
+            alpha = self._appearance(key, widget)
+            switch_pos = self._animated_switch(
+                key, 1.0 if hidden else 0.0, widget
+            )
+            selected = bool(opt.state & QStyle.State_Selected)
+            sel = self._animated_selection(
+                key, 1.0 if selected else 0.0, widget
+            )
+        else:
+            alpha = 1.0
+            switch_pos = 1.0 if hidden else 0.0
+            selected = bool(opt.state & QStyle.State_Selected)
+            sel = 1.0 if selected else 0.0
+        # the wash is drawn manually so it can cross-fade
+        opt.state = opt.state & ~QStyle.State_Selected
 
         deco_rect = style.subElementRect(
             QStyle.SE_ItemViewItemDecoration, opt, widget
@@ -256,6 +607,17 @@ class WindowItemDelegate(QStyledItemDelegate):
         shown_exe = sfm.elidedText(exe_name, Qt.ElideRight, sub_rect.width())
 
         painter.save()
+        painter.setOpacity(alpha)
+        # wash goes under the icon/decoration, otherwise it hides them
+        if sel > 0.01:
+            wash = QColor(BLUE_WASH)
+            wash.setAlpha(round(255 * sel))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(wash)
+            painter.drawRoundedRect(
+                QRectF(option.rect).adjusted(1, 1, -1, -1), 9, 9
+            )
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setFont(title_font)
         painter.setPen(QColor(TEXT))
@@ -284,33 +646,29 @@ class WindowItemDelegate(QStyledItemDelegate):
             painter.setPen(QColor(SLATE))
             painter.drawText(chip_rect, Qt.AlignCenter, self._CHIP_TEXT)
 
-        self._paint_switch(painter, self.switch_rect(option.rect), hidden)
+        hovered = (
+            widget is not None
+            and key is not None
+            and getattr(widget, "_hover_switch_key", None) == key
+        )
+        _paint_toggle(
+            painter, self.switch_rect(option.rect), switch_pos,
+            hovered=hovered,
+        )
         painter.restore()
-
-    @staticmethod
-    def _paint_switch(painter, rect, on):
-        track = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(BLUE) if on else QColor("#E4E9F2"))
-        radius = track.height() / 2
-        painter.drawRoundedRect(track, radius, radius)
-        knob_x = rect.right() - 18 if on else rect.left() + 2
-        knob = QRectF(knob_x, rect.top() + 2, 16, 16)
-        if on:
-            painter.setPen(Qt.NoPen)
-        else:
-            painter.setPen(QPen(QColor(LINE_STRONG), 1))
-        painter.setBrush(QColor("#FFFFFF"))
-        painter.drawEllipse(knob)
 
 
 class WindowListWidget(QListWidget):
     """Window list whose rows toggle capture with the right-side switch."""
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hover_switch_key = None
+
     def _switch_rect_at(self, index) -> QRect:
         return WindowItemDelegate.switch_rect(self.visualRect(index))
 
+    @_safe
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             index = self.indexAt(event.pos())
@@ -327,19 +685,34 @@ class WindowListWidget(QListWidget):
                     return
         super().mousePressEvent(event)
 
+    @_safe
     def mouseDoubleClickEvent(self, event):
         index = self.indexAt(event.pos())
         if index.isValid() and self._switch_rect_at(index).contains(event.pos()):
             return  # a double-click on the switch is still one toggle
         super().mouseDoubleClickEvent(event)
 
+    @_safe
     def mouseMoveEvent(self, event):
         index = self.indexAt(event.pos())
+        key = None
         if index.isValid() and self._switch_rect_at(index).contains(event.pos()):
+            key = index.data(HwndRole)
+        if key != self._hover_switch_key:
+            self._hover_switch_key = key
+            self.viewport().update()
+        if key is not None:
             self.viewport().setCursor(Qt.PointingHandCursor)
         else:
             self.viewport().unsetCursor()
         super().mouseMoveEvent(event)
+
+    @_safe
+    def leaveEvent(self, event):
+        if self._hover_switch_key is not None:
+            self._hover_switch_key = None
+            self.viewport().update()
+        super().leaveEvent(event)
 
 
 class WindowHiderUI(QWidget):
@@ -348,6 +721,7 @@ class WindowHiderUI(QWidget):
         apply_theme(QApplication.instance())
         self._is_updating = False
         self._is_syncing_opacity = False
+        self._shown_once = False
         self.workers = {}
         self._hide_failures = {}
         self._max_hide_failures = 3
@@ -361,6 +735,7 @@ class WindowHiderUI(QWidget):
         self.session = SessionState(state_file("shadowm_session.json"))
         TaskbarHider.set_session(self.session)
         WindowOpacity.set_session(self.session)
+        self._heal_failed = 0
         self._heal_session_leftovers()
 
         self.ime_guard = ImeGuard(self)
@@ -371,6 +746,13 @@ class WindowHiderUI(QWidget):
         self._setup_ui()
         self._register_hotkeys()
         self._setup_timer()
+        if self._heal_failed:
+            self.status_label.setText(
+                f"Could not undo changes a previous run left on "
+                f"{self._heal_failed} window(s). They will be retried on the "
+                f"next launch - run ShadowM as Administrator if this keeps "
+                f"happening."
+            )
 
     # ---- remembered hidden windows -----------------------------------------
 
@@ -411,8 +793,11 @@ class WindowHiderUI(QWidget):
         """Restores state a crashed previous run left on windows.
 
         Entries whose window is still alive with the recorded pid get their
-        original style, affinity and opacity back; entries for dead windows
-        or stale boots are dropped silently.
+        original style, affinity and opacity back. Entries for dead windows,
+        recycled hwnd values or a previous boot are dropped. Entries whose
+        restore fails (typically: ShadowM was relaunched without elevation)
+        stay in the session file so a later, properly elevated launch can
+        still undo them.
         """
         healed = failed = 0
 
@@ -430,8 +815,11 @@ class WindowHiderUI(QWidget):
                 )
                 if ok:
                     healed += 1
-                else:
-                    failed += 1
+                    self.session.clear_taskbar(hwnd)
+                    continue
+                failed += 1
+            else:
+                self.session.clear_taskbar(hwnd)
         for hwnd, info in self.session.opacity_items():
             if alive_with_pid(hwnd, info.get("pid")):
                 ok, _ = WindowOpacity.recover_leftover(
@@ -441,23 +829,39 @@ class WindowHiderUI(QWidget):
                 )
                 if ok:
                     healed += 1
-                else:
-                    failed += 1
+                    self.session.clear_opacity(hwnd)
+                    continue
+                failed += 1
+            else:
+                self.session.clear_opacity(hwnd)
         for hwnd, info in self.session.capture_items():
             if alive_with_pid(hwnd, info.get("pid")):
+                affinity = WindowCaptureHider.get_window_affinity(hwnd)
+                if affinity != WindowCaptureHider.WDA_EXCLUDEFROMCAPTURE:
+                    # nothing left to undo (or the app set its own affinity
+                    # since): leave the window untouched
+                    self.session.clear_capture(hwnd)
+                    continue
                 ok, _ = WindowCaptureHider.set_window_hidden(hwnd, False)
                 if ok:
                     healed += 1
-                else:
-                    failed += 1
+                    self.session.clear_capture(hwnd)
+                    continue
+                failed += 1
+            else:
+                self.session.clear_capture(hwnd)
         if healed or failed:
             logger.info(
                 "startup heal: restored %d leftover window(s), %d failed",
                 healed,
                 failed,
             )
-        self.session.clear_all()
-        self.session.delete()
+        self._heal_failed = failed
+        if failed:
+            self.session.save()  # keep the failures for the next launch
+        else:
+            self.session.clear_all()
+            self.session.delete()
 
     def _init_window(self):
         self.setWindowTitle("ShadowM")
@@ -542,12 +946,12 @@ class WindowHiderUI(QWidget):
         box.setContentsMargins(16, 12, 16, 12)
         box.setSpacing(9)
 
-        self.auto_hide_checkbox = QCheckBox("Auto-hide new windows")
+        self.auto_hide_checkbox = ToggleSwitch("Auto-hide new windows")
         self.auto_hide_checkbox.setToolTip(
             "When checked, every window that appears in the list below is "
             "automatically hidden from screen capture."
         )
-        self.ime_guard_checkbox = QCheckBox("IME candidate protection")
+        self.ime_guard_checkbox = ToggleSwitch("IME candidate protection")
         self.ime_guard_checkbox.setChecked(True)
         self.ime_guard_checkbox.setToolTip(
             "While the focused window is hidden, the IME candidate windows "
@@ -583,7 +987,7 @@ class WindowHiderUI(QWidget):
         self.opacity_slider.setToolTip(
             "On-screen transparency (1%-100%) of the selected window. This "
             "is a local visual effect only - whether the window is excluded "
-            "from capture is controlled by its checkbox above."
+            "from capture is controlled by the switch on its row above."
         )
         self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
         row.addWidget(self.opacity_slider, 1)
@@ -613,33 +1017,13 @@ class WindowHiderUI(QWidget):
                 hidden += 1
         self.window_count_label.setText(f"{hidden} of {total} hidden from capture")
 
-    @staticmethod
-    def _guarded(slot):
-        """Wraps a periodic slot so an exception degrades to a log entry.
-
-        PyQt5 aborts the whole process (qFatal, 0xC0000409) when an
-        exception escapes a slot invoked from C++, so no bug in a
-        periodic path may ever reach the event loop uncaught.
-        """
-
-        def wrapper(*args):
-            try:
-                return slot(*args)
-            except Exception:
-                logger.exception(
-                    "periodic callback failed: %s",
-                    getattr(slot, "__name__", slot),
-                )
-
-        return wrapper
-
     def _setup_timer(self):
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self._guarded(self.update_window_list))
-        self.timer.timeout.connect(self._guarded(self.ime_guard.refresh))
-        self.timer.timeout.connect(self._guarded(TaskbarHider.reconcile))
-        self.ime_guard.refresh()
-        self.update_window_list()
+        self.timer.timeout.connect(_safe(self.update_window_list))
+        self.timer.timeout.connect(_safe(self.ime_guard.refresh))
+        self.timer.timeout.connect(_safe(TaskbarHider.reconcile))
+        _safe(self.ime_guard.refresh)()
+        _safe(self.update_window_list)()
         self.timer.start(1500)
 
     def _register_hotkeys(self):
@@ -659,22 +1043,29 @@ class WindowHiderUI(QWidget):
 
     def nativeEvent(self, eventType, message):
         """Dispatches WM_HOTKEY messages from the global hotkeys."""
-        if eventType == b"windows_generic_MSG":
-            msg = wintypes.MSG.from_address(int(message))
-            if (
-                msg.message == TaskbarHider.WM_HOTKEY
-                and msg.wParam == TaskbarHider.HOTKEY_TOGGLE_ALL
-            ):
-                self._toggle_all_taskbar_hidden()
-                return True, 0
+        try:
+            if eventType == b"windows_generic_MSG":
+                msg = wintypes.MSG.from_address(int(message))
+                if (
+                    msg.message == TaskbarHider.WM_HOTKEY
+                    and msg.wParam == TaskbarHider.HOTKEY_TOGGLE_ALL
+                ):
+                    self._toggle_all_taskbar_hidden()
+                    return True, 0
+        except Exception:
+            logger.exception("handling a native window event failed")
         return super().nativeEvent(eventType, message)
 
+    @_safe
     def showEvent(self, event):
         super().showEvent(event)
         own_hwnd = int(self.winId())
         _style_native_frame(own_hwnd)
         WindowCaptureHider.set_window_hidden(own_hwnd, True)
         self.ime_guard.note_window_state(own_hwnd, True, True)
+        if not self._shown_once:
+            self._shown_once = True
+            _fade_in(self, 180)
         self.update_window_list()
 
     def update_window_list(self):
@@ -726,35 +1117,12 @@ class WindowHiderUI(QWidget):
 
             # Windows reuses hwnd values: a same-hwnd window with a different
             # pid is a new window that must go through new-window handling
-            same_window = hwnd in current_hwnds and (
+            in_listing = hwnd in current_hwnds
+            same_window = in_listing and (
                 known_pid is None or known_pid == current_hwnds[hwnd]["pid"]
             )
 
-            if not same_window:
-                misses = (item.data(MissRole) or 0) + 1
-                item.setData(MissRole, misses)
-                if misses < 2:
-                    continue  # enumeration flicker: re-check next refresh
-                if (
-                    item.checkState() == Qt.Checked
-                    and hwnd != int(self.winId())
-                    and item.data(ExplicitRole)
-                ):
-                    # closed while the user had it hidden: remember for relaunch
-                    self._remember_window(
-                        item.data(ExeRole),
-                        _strip_taskbar_suffix(item.text()),
-                    )
-                self.list_widget.takeItem(i)
-                if not window_exists(hwnd):
-                    # truly gone: drop our bookkeeping for good
-                    WindowOpacity.restore(hwnd)
-                    TaskbarHider.forget(hwnd)
-                # still alive (e.g. minimized to the tray): keep styles and
-                # tracking; TaskbarHider.reconcile keeps enforcing them
-                self.ime_guard.forget(hwnd)
-                self._hide_failures.pop(hwnd, None)
-            else:
+            if same_window:
                 item.setData(MissRole, 0)
                 expected_text = current_hwnds[hwnd]["title"]
                 if item.data(TaskbarMemberRole) and TaskbarHider.is_hidden(hwnd):
@@ -762,6 +1130,43 @@ class WindowHiderUI(QWidget):
                 if item.text() != expected_text:
                     item.setText(expected_text)
                 del current_hwnds[hwnd]
+                continue
+
+            if in_listing:
+                # the hwnd value now belongs to a different process, so the
+                # item's window is gone for good; remove it in this same
+                # refresh or the reused hwnd would show up as a duplicate row
+                gone_for_good = True
+            else:
+                misses = (item.data(MissRole) or 0) + 1
+                item.setData(MissRole, misses)
+                if misses < 2:
+                    continue  # enumeration flicker: re-check next refresh
+                gone_for_good = not window_exists(hwnd)
+
+            if (
+                item.checkState() == Qt.Checked
+                and hwnd != int(self.winId())
+                and item.data(ExplicitRole)
+            ):
+                # closed while the user had it hidden: remember for relaunch
+                self._remember_window(
+                    item.data(ExeRole),
+                    _strip_taskbar_suffix(item.text()),
+                )
+            delegate = self.list_widget.itemDelegate()
+            if hasattr(delegate, "forget"):
+                delegate.forget(hwnd)
+            self.list_widget.takeItem(i)
+            if gone_for_good:
+                # truly gone: drop our bookkeeping for good
+                WindowOpacity.restore(hwnd)
+                TaskbarHider.forget(hwnd)
+                self.session.clear_capture(hwnd)
+            # still alive (e.g. minimized to the tray): keep styles and
+            # tracking; TaskbarHider.reconcile keeps enforcing them
+            self.ime_guard.forget(hwnd)
+            self._hide_failures.pop(hwnd, None)
 
     def _add_new_items(self, new_hwnds: dict):
         """Creates new list items for recently discovered windows."""
@@ -837,11 +1242,13 @@ class WindowHiderUI(QWidget):
         box.setStandardButtons(QMessageBox.Ok)
         box.exec_()
 
+    @_safe
     def on_item_double_clicked(self, item):
         current_state = item.checkState()
         new_state = Qt.Checked if current_state == Qt.Unchecked else Qt.Unchecked
         item.setCheckState(new_state)
 
+    @_safe
     def on_list_context_menu(self, pos):
         """Right-click actions: taskbar / Alt-Tab visibility, show window."""
         item = self.list_widget.itemAt(pos)
@@ -952,6 +1359,7 @@ class WindowHiderUI(QWidget):
             + (f" ({failures} failed)" if failures else "")
         )
 
+    @_safe
     def on_item_changed(self, item):
         if self._is_updating:
             return
@@ -971,6 +1379,7 @@ class WindowHiderUI(QWidget):
                 "try again in a moment."
             )
 
+    @_safe
     def on_hide_finished(self, hwnd, is_checked, success, msg):
         worker = self.workers.pop(hwnd, None)
         auto = False
@@ -1024,6 +1433,7 @@ class WindowHiderUI(QWidget):
                 f"Retrying hide ({self._hide_failures[hwnd]}): {msg}"
             )
 
+    @_safe
     def closeEvent(self, event):
         if not self._confirm_exit():
             event.ignore()
@@ -1048,13 +1458,27 @@ class WindowHiderUI(QWidget):
             item = self.list_widget.item(i)
             hwnd = item.data(HwndRole)
             if item.checkState() == Qt.Checked and hwnd != own_hwnd:
-                targets[hwnd] = item.data(ExeRole)
+                targets[hwnd] = (item.data(ExeRole), item.data(PidRole))
         for hwnd, info in self.session.capture_items():
             # covers windows still hidden but no longer listed (tray apps)
-            targets.setdefault(hwnd, info.get("exe", ""))
+            targets.setdefault(hwnd, (info.get("exe", ""), info.get("pid")))
 
         restored = failed = 0
-        for hwnd, exe in targets.items():
+        for hwnd, (exe, pid) in targets.items():
+            if not window_exists(hwnd):
+                # the window is gone and its display affinity with it
+                self.session.clear_capture(hwnd)
+                continue
+            if pid is not None and get_window_pid(hwnd) != pid:
+                # hwnd value was recycled by an unrelated window: leave that
+                # window untouched and drop the stale record
+                self.session.clear_capture(hwnd)
+                continue
+            affinity = WindowCaptureHider.get_window_affinity(hwnd)
+            if affinity != WindowCaptureHider.WDA_EXCLUDEFROMCAPTURE:
+                # not (or no longer) excluded by us - nothing to undo
+                self.session.clear_capture(hwnd)
+                continue
             ok, msg = WindowCaptureHider.set_window_hidden(hwnd, False)
             if ok:
                 restored += 1
@@ -1093,6 +1517,7 @@ class WindowHiderUI(QWidget):
         box.setDefaultButton(QMessageBox.No)
         return box.exec_() == QMessageBox.Yes
 
+    @_safe
     def on_current_item_changed(self, current, _previous):
         """Syncs the opacity slider with the newly selected window."""
         if current is None:
@@ -1105,6 +1530,7 @@ class WindowHiderUI(QWidget):
         self.opacity_value_label.setText(f"{self.opacity_slider.value()}%")
         self._is_syncing_opacity = False
 
+    @_safe
     def on_opacity_changed(self, value):
         self.opacity_value_label.setText(f"{value}%")
         if self._is_syncing_opacity:
@@ -1115,11 +1541,21 @@ class WindowHiderUI(QWidget):
         hwnd = item.data(HwndRole)
         if value >= 100:
             success, msg = WindowOpacity.restore(hwnd)
+            if success:
+                # 100% means "back to its original alpha": a window that was
+                # translucent on its own returns to e.g. 50%, not to opaque
+                actual = WindowOpacity.get_percent(hwnd)
+                if actual != value:
+                    self._is_syncing_opacity = True
+                    self.opacity_slider.setValue(actual)
+                    self._is_syncing_opacity = False
+                    self.opacity_value_label.setText(f"{actual}%")
         else:
             success, msg = WindowOpacity.set_opacity(hwnd, value)
         if not success:
             self.status_label.setText(f"Opacity change failed: {msg}")
 
+    @_safe
     def on_ime_guard_active(self, active):
         self.status_label.setText(
             "IME candidate windows are excluded from capture."
@@ -1127,6 +1563,7 @@ class WindowHiderUI(QWidget):
             else ""
         )
 
+    @_safe
     def on_ime_guard_error(self, msg):
         self.status_label.setText(
             f"IME candidate protection failed: {msg}"

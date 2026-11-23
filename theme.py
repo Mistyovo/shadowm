@@ -44,10 +44,6 @@ def asset(name: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name)
 
 
-def _url(name: str) -> str:
-    return asset(name).replace("\\", "/")
-
-
 def _palette() -> QPalette:
     p = QPalette()
     p.setColor(QPalette.Window, QColor(BG))
@@ -127,21 +123,12 @@ def _stylesheet() -> str:
         border: 1px solid {LINE};
         border-radius: 12px;
     }}
-    QFrame#card QLabel, QFrame#card QCheckBox, QFrame#card QSlider {{
+    QFrame#card QLabel, QFrame#card QSlider {{
         background: transparent;
     }}
-    QCheckBox {{
+    QAbstractButton#toggleSwitch {{
         background: transparent;
-        spacing: 11px;
         font-size: 9pt;
-    }}
-    QCheckBox::indicator {{
-        width: 36px;
-        height: 20px;
-        image: url({_url("switch_off.svg")});
-    }}
-    QCheckBox::indicator:checked {{
-        image: url({_url("switch_on.svg")});
     }}
     QListView#windowList {{
         background: {CARD};
@@ -158,7 +145,7 @@ def _stylesheet() -> str:
         background: rgba(24, 33, 50, 0.035);
     }}
     QListView#windowList::item:selected {{
-        background: {BLUE_WASH};
+        background: transparent;
         color: {INK};
     }}
     QSlider::groove:horizontal {{

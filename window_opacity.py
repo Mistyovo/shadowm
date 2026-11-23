@@ -36,6 +36,18 @@ _get_exstyle.restype = _long_ptr
 _set_exstyle.argtypes = [wintypes.HWND, ctypes.c_int, _long_ptr]
 _set_exstyle.restype = _long_ptr
 
+
+def _set_exstyle_checked(hwnd, style) -> bool:
+    """True when the extended style was written.
+
+    SetWindowLongPtrW returns the PREVIOUS style - 0 both when the call
+    fails and when the old style legitimately was 0 - so the thread-local
+    last-error has to disambiguate the two cases.
+    """
+    ctypes.set_last_error(0)
+    previous = _set_exstyle(hwnd, GWL_EXSTYLE, style)
+    return bool(previous) or ctypes.get_last_error() == 0
+
 u32.SetLayeredWindowAttributes.argtypes = [
     wintypes.HWND,
     wintypes.COLORREF,
@@ -96,7 +108,7 @@ class WindowOpacity:
 
         style = _get_exstyle(hwnd, GWL_EXSTYLE)
         if not style & WS_EX_LAYERED:
-            if not _set_exstyle(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED):
+            if not _set_exstyle_checked(hwnd, style | WS_EX_LAYERED):
                 return False, (
                     f"SetWindowLongPtr failed (Code: {ctypes.get_last_error()})"
                 )

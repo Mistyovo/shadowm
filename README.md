@@ -41,7 +41,7 @@ python main.py
 ```
 > Note: For completely silent execution without a console window, use `pythonw.exe main.py` instead.
 
-Toggle the checkbox next to any window to make it immediately invisible to OBS capture.
+Toggle the switch on the right of any row to make that window immediately invisible to OBS capture. Click a row to adjust its on-screen opacity.
 
 Notes:
 - Only one ShadowM instance may run at a time; a second launch tells you and exits.
@@ -50,7 +50,7 @@ Notes:
 ## Exit Behavior and Crash Recovery
 On a normal exit (after the confirmation dialog) ShadowM undoes every change it made: capture exclusion, taskbar/Alt-Tab styles, opacity and IME candidate protection. Windows hidden but no longer listed (e.g. minimized to the tray) are restored too.
 
-If ShadowM is killed abruptly, it cannot restore anything itself - so it records everything it changed in `shadowm_session.json` (next to the script) as it goes. The next launch checks that file, verifies each recorded window is still alive with the same process id, and restores its original state automatically. A boot marker makes entries from before a reboot untrusted, since window handles never survive a restart.
+If ShadowM is killed abruptly, it cannot restore anything itself - so it records everything it changed in `shadowm_session.json` in the per-user state dir as it goes. The next launch checks that file, verifies each recorded window is still alive with the same process id, and restores its original state automatically. A boot marker makes entries from before a reboot untrusted, since window handles never survive a restart. Entries that could not be restored (typically because ShadowM was relaunched without elevation) are kept and retried on the next launch.
 
 ## IME Candidate Protection
 Hiding an application window does not hide the IME candidate bar floating above it, so ShadowM protects it separately while the "Also hide the IME candidate box" option is enabled and the foreground window is one ShadowM has hidden:

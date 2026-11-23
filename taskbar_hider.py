@@ -42,6 +42,18 @@ _get_exstyle.restype = _long_ptr
 _set_exstyle.argtypes = [wintypes.HWND, ctypes.c_int, _long_ptr]
 _set_exstyle.restype = _long_ptr
 
+
+def _set_exstyle_checked(hwnd, style) -> bool:
+    """True when the extended style was written.
+
+    SetWindowLongPtrW returns the PREVIOUS style - 0 both when the call
+    fails and when the old style legitimately was 0 - so the thread-local
+    last-error has to disambiguate the two cases.
+    """
+    ctypes.set_last_error(0)
+    previous = _set_exstyle(hwnd, GWL_EXSTYLE, style)
+    return bool(previous) or ctypes.get_last_error() == 0
+
 u32.SetWindowPos.argtypes = [
     wintypes.HWND,
     wintypes.HWND,
@@ -232,7 +244,7 @@ class TaskbarHider:
     @classmethod
     def _apply(cls, hwnd: int, exstyle: int) -> bool:
         """Writes the extended style and makes the shell re-read it."""
-        if not _set_exstyle(hwnd, GWL_EXSTYLE, exstyle):
+        if not _set_exstyle_checked(hwnd, exstyle):
             return False
         u32.SetWindowPos(
             hwnd,

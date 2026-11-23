@@ -70,6 +70,12 @@ class PROCESSENTRY32W(ctypes.Structure):
     ]
 
 
+k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+k32.Process32FirstW.restype = wintypes.BOOL
+k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+k32.Process32NextW.restype = wintypes.BOOL
+
+
 # Process/module snapshot declarations live in capture_hider (shared k32).
 
 u32.GetForegroundWindow.restype = wintypes.HWND
@@ -202,8 +208,12 @@ class ImeGuard(QObject):
                 self._desired = False
                 self.active_changed.emit(False)
             self._remove_all_hooks()
-            for hwnd in list(self._ime_windows):
-                self._apply(hwnd, False, force=True)
+            # restore only what we armed - touching every candidate window
+            # we merely track (Sogou alone can own dozens) would be pointless
+            # injection attempts for windows that were never excluded
+            for hwnd, applied in list(self._applied.items()):
+                if applied:
+                    self._apply(hwnd, False, force=True)
 
     def note_window_state(self, hwnd, hidden, success):
         """Feeds the outcome of every hide/unhide done by the main window."""
@@ -235,10 +245,16 @@ class ImeGuard(QObject):
         self._update_hooks()
         if not self._healed:
             # Restore anything a previous run left excluded (e.g. after a crash
-            # or Task Manager kill while typing in a hidden window).
+            # or Task Manager kill while typing in a hidden window). Only
+            # windows actually carrying our affinity are touched: the rest
+            # never had anything to undo.
             self._healed = True
             for hwnd in list(self._ime_windows):
-                self._apply(hwnd, False, force=True)
+                if (
+                    WindowCaptureHider.get_window_affinity(hwnd)
+                    == WindowCaptureHider.WDA_EXCLUDEFROMCAPTURE
+                ):
+                    self._apply(hwnd, False, force=True)
         self.evaluate()
 
     def evaluate(self):

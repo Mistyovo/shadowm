@@ -68,10 +68,19 @@ u32.IsWindow.restype = wintypes.BOOL
 u32.IsWindowVisible.argtypes = [wintypes.HWND]
 u32.IsWindowVisible.restype = wintypes.BOOL
 
+u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+u32.GetWindowTextLengthW.restype = ctypes.c_int
+
+u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+u32.GetWindowTextW.restype = ctypes.c_int
+
 u32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 u32.GetClassNameW.restype = ctypes.c_int
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+u32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
+u32.EnumWindows.restype = wintypes.BOOL
 
 MEM_RELEASE = 0x8000
 WAIT_OBJECT_0 = 0x0000

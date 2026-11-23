@@ -104,7 +104,16 @@ def main():
             "Restart ShadowM elevated to enable everything.",
         )
 
-    window = WindowHiderUI()
+    try:
+        window = WindowHiderUI()
+    except Exception:
+        logger.exception("startup failed")
+        _warn_box(
+            "ShadowM failed to start.",
+            "See shadowm.log in the ShadowM folder under %APPDATA% for "
+            "details.",
+        )
+        return 1
     window.show()
     rc = app.exec_()
     logger.info("exited rc=%d", rc)
