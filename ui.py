@@ -24,8 +24,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from PyQt5.QtCore import (
+    QEvent,
     QFileInfo,
-    QPointF,
     QRect,
     QRectF,
     QSize,
@@ -42,13 +42,13 @@ from session_state import SessionState
 from taskbar_hider import TaskbarHider
 from theme import (
     BG,
-    CLAY,
+    BLUE,
     INK,
     LINE,
+    LINE_STRONG,
     MUTED,
-    OCHRE,
-    OCHRE_WASH,
-    OLIVE,
+    SLATE,
+    SLATE_WASH,
     TEXT,
     apply as apply_theme,
     asset as theme_asset,
@@ -160,7 +160,7 @@ def _load_logo_pixmap(size: int = 32) -> QPixmap:
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
     p.setPen(Qt.NoPen)
-    p.setBrush(QColor(CLAY))
+    p.setBrush(QColor(BLUE))
     p.drawRoundedRect(
         QRectF(size * 0.40, size * 0.10, size * 0.50, size * 0.50),
         size * 0.12,
@@ -180,20 +180,43 @@ def _load_logo_pixmap(size: int = 32) -> QPixmap:
 
 
 class WindowItemDelegate(QStyledItemDelegate):
-    """Two-line rows: window title over its owning exe name.
+    """Two-line rows with one capture switch on the right.
 
+    The left checkbox is gone: state lives in the row's switch and the
+    list header summarises it, so no per-row status sentence repeats.
     Presentation only: the item text keeps the raw " [taskbar hidden]"
-    suffix that all logic depends on; the delegate strips it at paint
-    time and renders a soft chip plus the capture-state caption instead.
+    suffix that all logic depends on; the delegate strips it at paint time.
     """
 
     _CHIP_TEXT = "taskbar"
-    _ROW_HEIGHT = 52
+    _ROW_HEIGHT = 54
+    _SWITCH_W = 36
+    _SWITCH_H = 20
+    _RIGHT_PAD = 12
+
+    @classmethod
+    def switch_rect(cls, item_rect: QRect) -> QRect:
+        x = item_rect.right() - cls._RIGHT_PAD - cls._SWITCH_W
+        y = item_rect.center().y() - cls._SWITCH_H // 2
+        return QRect(x, y, cls._SWITCH_W, cls._SWITCH_H)
 
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
         size.setHeight(self._ROW_HEIGHT)
         return size
+
+    def editorEvent(self, event, model, option, index):
+        # Mouse clicks are handled by WindowListWidget; returning False here
+        # keeps the default delegate from toggling a no-longer-drawn
+        # left-side check indicator.
+        if event.type() in (
+            QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease,
+            QEvent.MouseButtonDblClick,
+            QEvent.MouseMove,
+        ):
+            return False
+        return super().editorEvent(event, model, option, index)
 
     def paint(self, painter, option, index):
         opt = QStyleOptionViewItem(option)
@@ -203,38 +226,32 @@ class WindowItemDelegate(QStyledItemDelegate):
         title = full_text[: -len(TASKBAR_SUFFIX)] if has_chip else full_text
         hidden = opt.checkState == Qt.Checked
         opt.text = ""  # drawn manually below
+        opt.features = opt.features & ~QStyleOptionViewItem.HasCheckIndicator
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
         style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
 
-        check_rect = style.subElementRect(
-            QStyle.SE_ViewItemCheckIndicator, opt, widget
-        )
         deco_rect = style.subElementRect(
             QStyle.SE_ItemViewItemDecoration, opt, widget
         )
-        content_left = max(check_rect.right(), deco_rect.right()) + 10
+        content_left = max(option.rect.left() + 16, deco_rect.right() + 12)
         rect = option.rect.adjusted(
-            content_left - option.rect.left(), 0, -12, 0
+            content_left - option.rect.left(),
+            0,
+            -(self._RIGHT_PAD + self._SWITCH_W + 10),
+            0,
         )
-
-        state_font = QFont(opt.font)
-        state_font.setPointSizeF(8)
-        state_text = "off capture" if hidden else "in capture"
-        state_w = QFontMetrics(state_font).horizontalAdvance(state_text) + 14
 
         title_font = QFont(opt.font)
         title_font.setPointSizeF(9.5)
-        title_font.setWeight(QFont.DemiBold)
+        title_font.setWeight(QFont.Medium)
         fm = QFontMetrics(title_font)
-        title_rect = QRect(
-            rect.left(), rect.top() + 8, max(20, rect.width() - state_w - 8), 18
-        )
+        title_rect = QRect(rect.left(), rect.top() + 10, rect.width(), 18)
 
         sub_font = QFont(opt.font)
         sub_font.setPointSizeF(8)
         sfm = QFontMetrics(sub_font)
-        sub_rect = QRect(rect.left(), title_rect.bottom() + 1, title_rect.width(), 14)
+        sub_rect = QRect(rect.left(), title_rect.bottom() + 2, rect.width(), 14)
         exe_name = os.path.basename(index.data(ExeRole) or "") or "-"
         shown_exe = sfm.elidedText(exe_name, Qt.ElideRight, sub_rect.width())
 
@@ -258,36 +275,71 @@ class WindowItemDelegate(QStyledItemDelegate):
             cfm = QFontMetrics(chip_font)
             chip_w = cfm.horizontalAdvance(self._CHIP_TEXT) + 14
             chip_x = rect.left() + sfm.horizontalAdvance(shown_exe) + 8
-            chip_x = min(chip_x, rect.right() - state_w - chip_w - 4)
+            chip_x = min(chip_x, rect.right() - chip_w)
             chip_rect = QRectF(chip_x, sub_rect.center().y() - 7, chip_w, 14)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(OCHRE_WASH))
+            painter.setBrush(QColor(SLATE_WASH))
             painter.drawRoundedRect(chip_rect, 7, 7)
             painter.setFont(chip_font)
-            painter.setPen(QColor(OCHRE))
+            painter.setPen(QColor(SLATE))
             painter.drawText(chip_rect, Qt.AlignCenter, self._CHIP_TEXT)
 
-        state_rect = QRect(
-            rect.right() - state_w, rect.top(), state_w, option.rect.height()
-        )
-        dot_cx = state_rect.right() - 5
-        dot_cy = state_rect.center().y()
-        painter.setPen(Qt.NoPen)
-        if hidden:
-            painter.setBrush(QColor(OLIVE))
-            painter.drawEllipse(QPointF(dot_cx, dot_cy), 2.6, 2.6)
-            painter.setPen(QColor(OLIVE))
-        else:
-            painter.setBrush(QColor(MUTED))
-            painter.drawEllipse(QPointF(dot_cx, dot_cy), 2.2, 2.2)
-            painter.setPen(QColor(MUTED))
-        painter.setFont(state_font)
-        painter.drawText(
-            state_rect.adjusted(0, 0, -12, 0),
-            Qt.AlignVCenter | Qt.AlignRight,
-            state_text,
-        )
+        self._paint_switch(painter, self.switch_rect(option.rect), hidden)
         painter.restore()
+
+    @staticmethod
+    def _paint_switch(painter, rect, on):
+        track = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(BLUE) if on else QColor("#E4E9F2"))
+        radius = track.height() / 2
+        painter.drawRoundedRect(track, radius, radius)
+        knob_x = rect.right() - 18 if on else rect.left() + 2
+        knob = QRectF(knob_x, rect.top() + 2, 16, 16)
+        if on:
+            painter.setPen(Qt.NoPen)
+        else:
+            painter.setPen(QPen(QColor(LINE_STRONG), 1))
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawEllipse(knob)
+
+
+class WindowListWidget(QListWidget):
+    """Window list whose rows toggle capture with the right-side switch."""
+
+    def _switch_rect_at(self, index) -> QRect:
+        return WindowItemDelegate.switch_rect(self.visualRect(index))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            index = self.indexAt(event.pos())
+            if index.isValid():
+                hit = self._switch_rect_at(index).adjusted(-4, -6, 5, 6)
+                if hit.contains(event.pos()):
+                    item = self.itemFromIndex(index)
+                    if item is not None:
+                        item.setCheckState(
+                            Qt.Unchecked
+                            if item.checkState() == Qt.Checked
+                            else Qt.Checked
+                        )
+                    return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        index = self.indexAt(event.pos())
+        if index.isValid() and self._switch_rect_at(index).contains(event.pos()):
+            return  # a double-click on the switch is still one toggle
+        super().mouseDoubleClickEvent(event)
+
+    def mouseMoveEvent(self, event):
+        index = self.indexAt(event.pos())
+        if index.isValid() and self._switch_rect_at(index).contains(event.pos()):
+            self.viewport().setCursor(Qt.PointingHandCursor)
+        else:
+            self.viewport().unsetCursor()
+        super().mouseMoveEvent(event)
 
 
 class WindowHiderUI(QWidget):
@@ -422,12 +474,17 @@ class WindowHiderUI(QWidget):
         layout.addWidget(self._build_settings_card())
         layout.addLayout(self._build_list_header())
 
-        self.list_widget = QListWidget()
+        self.list_widget = WindowListWidget()
         self.list_widget.setObjectName("windowList")
         self.list_widget.setIconSize(QSize(26, 26))
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.list_widget.setUniformItemSizes(True)
+        self.list_widget.viewport().setMouseTracking(True)
+        self.list_widget.setToolTip(
+            "Blue switch: hidden from screen capture. "
+            "Click a row to adjust its opacity."
+        )
         self.list_widget.setItemDelegate(WindowItemDelegate(self.list_widget))
         self.list_widget.itemChanged.connect(self.on_item_changed)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
@@ -469,9 +526,6 @@ class WindowHiderUI(QWidget):
         header.addLayout(titles)
         header.addStretch()
 
-        pills = QVBoxLayout()
-        pills.setSpacing(5)
-        self.hidden_pill = QLabel("", objectName="pill")
         self.admin_pill = QLabel("", objectName="pill")
         if _is_elevated():
             self.admin_pill.setText("Admin")
@@ -479,9 +533,7 @@ class WindowHiderUI(QWidget):
         else:
             self.admin_pill.setText("Not elevated")
             self._set_pill_accent(self.admin_pill, "warn")
-        pills.addWidget(self.hidden_pill, 0, Qt.AlignRight)
-        pills.addWidget(self.admin_pill, 0, Qt.AlignRight)
-        header.addLayout(pills)
+        header.addWidget(self.admin_pill, 0, Qt.AlignTop)
         return header
 
     def _build_settings_card(self):
@@ -490,12 +542,12 @@ class WindowHiderUI(QWidget):
         box.setContentsMargins(16, 12, 16, 12)
         box.setSpacing(9)
 
-        self.auto_hide_checkbox = QCheckBox("Hide new windows automatically")
+        self.auto_hide_checkbox = QCheckBox("Auto-hide new windows")
         self.auto_hide_checkbox.setToolTip(
             "When checked, every window that appears in the list below is "
             "automatically hidden from screen capture."
         )
-        self.ime_guard_checkbox = QCheckBox("Protect the IME candidate bar")
+        self.ime_guard_checkbox = QCheckBox("IME candidate protection")
         self.ime_guard_checkbox.setChecked(True)
         self.ime_guard_checkbox.setToolTip(
             "While the focused window is hidden, the IME candidate windows "
@@ -559,9 +611,7 @@ class WindowHiderUI(QWidget):
             total += 1
             if item.checkState() == Qt.Checked:
                 hidden += 1
-        self.window_count_label.setText(f"{total} windows")
-        self.hidden_pill.setText(f"{hidden} off capture")
-        self._set_pill_accent(self.hidden_pill, "good" if hidden else None)
+        self.window_count_label.setText(f"{hidden} of {total} hidden from capture")
 
     @staticmethod
     def _guarded(slot):

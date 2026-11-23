@@ -1,9 +1,10 @@
-"""Visual theme: warm paper, ink and clay.
+"""Visual theme: cool white-blue with ink text.
 
-Inspired by Anthropic's design language: an ivory canvas, near-black ink,
-one clay accent reserved for interaction, olive for "off capture", ochre
-for cautions, and Sitka Display serif headings. Assets resolve by absolute
-path so they work in dev runs and inside a PyInstaller onefile bundle.
+A paper-white canvas under a clear blue accent; the blue is reserved for
+interaction (switches, slider, selection), amber for cautions, and serif
+headings (Sitka Display) for an editorial, unhurried tone. Assets resolve
+by absolute path so they work in dev runs and inside a PyInstaller onefile
+bundle.
 """
 
 import os
@@ -13,24 +14,24 @@ from PyQt5.QtGui import QColor, QFont, QPalette
 from PyQt5.QtWidgets import QApplication, QStyleFactory
 
 # ---- palette -------------------------------------------------------------
-BG = "#F0EEE6"          # window canvas (warm ivory)
-CARD = "#FAF9F5"        # cards, list, menus
-FIELD = "#FBF9F4"       # inputs, viewport
-INK = "#1F1E1D"         # primary text
+BG = "#F3F6FB"          # window canvas (cool paper white)
+CARD = "#FFFFFF"        # cards, list, menus
+FIELD = "#FFFFFF"       # inputs, viewport
+INK = "#182132"         # primary text (blue-black)
 TEXT = INK              # alias kept for older call sites
-MUTED = "#6E6B62"       # secondary text
-FAINT = "#857F73"       # tertiary text
-LINE = "#E3DFD4"        # hairlines
-LINE_STRONG = "#D2CCBE"
-CLAY = "#C15F3C"        # interaction accent (checked, selected, slider)
-CLAY_DEEP = "#A94E2E"
-CLAY_WASH = "#F2E7DE"   # selected row / menu highlight
-OLIVE = "#5A7048"       # off capture (protected)
-OLIVE_WASH = "#ECEFE4"
-OCHRE = "#8A5F1C"       # warnings
-OCHRE_WASH = "#F5ECD9"
-DANGER = "#A63A2A"
-ACCENT = CLAY           # alias kept for older call sites
+MUTED = "#5D6B80"       # secondary text
+FAINT = "#8C97A8"       # tertiary text
+LINE = "#E3E9F1"        # hairlines
+LINE_STRONG = "#C9D3E1"
+BLUE = "#2F6BEB"        # interaction accent (checked, selected, slider)
+BLUE_DEEP = "#2457C9"
+BLUE_WASH = "#E9F0FD"   # selected row / menu highlight
+SLATE = "#54637A"       # mode chips (taskbar)
+SLATE_WASH = "#EEF2F8"
+WARN = "#9A5B00"        # cautions
+WARN_WASH = "#FCF2E0"
+DANGER = "#BE3A2B"
+ACCENT = BLUE           # alias kept for older call sites
 
 _UI_FONTS = '"Segoe UI Variable Text", "Segoe UI"'
 _SERIF = '"Sitka Display", "Sitka Text", Georgia, serif'
@@ -56,10 +57,10 @@ def _palette() -> QPalette:
     p.setColor(QPalette.Text, QColor(INK))
     p.setColor(QPalette.Button, QColor(CARD))
     p.setColor(QPalette.ButtonText, QColor(INK))
-    p.setColor(QPalette.Highlight, QColor(CLAY_WASH))
+    p.setColor(QPalette.Highlight, QColor(BLUE_WASH))
     p.setColor(QPalette.HighlightedText, QColor(INK))
     p.setColor(QPalette.ToolTipBase, QColor(INK))
-    p.setColor(QPalette.ToolTipText, QColor("#F7F4EC"))
+    p.setColor(QPalette.ToolTipText, QColor("#F5F8FD"))
     p.setColor(QPalette.PlaceholderText, QColor(FAINT))
     p.setColor(QPalette.Disabled, QPalette.Text, QColor(FAINT))
     p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(FAINT))
@@ -111,15 +112,15 @@ def _stylesheet() -> str:
         font-size: 7.5pt;
         font-weight: 600;
         color: {MUTED};
-        background: rgba(31, 30, 29, 0.05);
+        background: rgba(24, 33, 50, 0.05);
     }}
     QLabel#pill[accent="good"] {{
-        color: {OLIVE};
-        background: {OLIVE_WASH};
+        color: {BLUE};
+        background: {BLUE_WASH};
     }}
     QLabel#pill[accent="warn"] {{
-        color: {OCHRE};
-        background: {OCHRE_WASH};
+        color: {WARN};
+        background: {WARN_WASH};
     }}
     QFrame#card {{
         background: {CARD};
@@ -129,18 +130,13 @@ def _stylesheet() -> str:
     QFrame#card QLabel, QFrame#card QCheckBox, QFrame#card QSlider {{
         background: transparent;
     }}
-    QFrame#hairline {{
-        background: {LINE};
-        border: none;
-        max-height: 1px;
-    }}
     QCheckBox {{
         background: transparent;
         spacing: 11px;
         font-size: 9pt;
     }}
     QCheckBox::indicator {{
-        width: 34px;
+        width: 36px;
         height: 20px;
         image: url({_url("switch_off.svg")});
     }}
@@ -155,23 +151,15 @@ def _stylesheet() -> str:
         outline: 0;
     }}
     QListView#windowList::item {{
-        padding: 4px 6px;
-        border-radius: 8px;
+        padding: 5px 8px;
+        border-radius: 9px;
     }}
     QListView#windowList::item:hover {{
-        background: rgba(31, 30, 29, 0.045);
+        background: rgba(24, 33, 50, 0.035);
     }}
     QListView#windowList::item:selected {{
-        background: {CLAY_WASH};
+        background: {BLUE_WASH};
         color: {INK};
-    }}
-    QListView#windowList::indicator {{
-        width: 18px;
-        height: 18px;
-        image: url({_url("check_off.svg")});
-    }}
-    QListView#windowList::indicator:checked {{
-        image: url({_url("check.svg")});
     }}
     QSlider::groove:horizontal {{
         height: 4px;
@@ -179,7 +167,7 @@ def _stylesheet() -> str:
         background: {LINE};
     }}
     QSlider::sub-page:horizontal {{
-        background: {CLAY};
+        background: {BLUE};
         border-radius: 2px;
     }}
     QSlider::handle:horizontal {{
@@ -191,7 +179,7 @@ def _stylesheet() -> str:
         border: 1.5px solid {LINE_STRONG};
     }}
     QSlider::handle:horizontal:hover {{
-        border-color: {CLAY};
+        border-color: {BLUE};
     }}
     QSlider::handle:horizontal:disabled {{
         background: {BG};
@@ -209,7 +197,7 @@ def _stylesheet() -> str:
         font-size: 9pt;
     }}
     QMenu::item:selected {{
-        background: {CLAY_WASH};
+        background: {BLUE_WASH};
         color: {INK};
     }}
     QMenu::item:disabled {{
@@ -239,14 +227,14 @@ def _stylesheet() -> str:
         background: {LINE};
     }}
     QPushButton:default {{
-        background: {CLAY};
-        border: 1px solid {CLAY};
+        background: {BLUE};
+        border: 1px solid {BLUE};
         color: {FIELD};
         font-weight: 600;
     }}
     QPushButton:default:hover {{
-        background: {CLAY_DEEP};
-        border-color: {CLAY_DEEP};
+        background: {BLUE_DEEP};
+        border-color: {BLUE_DEEP};
     }}
     QScrollBar:vertical {{
         background: transparent;
@@ -269,7 +257,7 @@ def _stylesheet() -> str:
     }}
     QToolTip {{
         background: {INK};
-        color: #F7F4EC;
+        color: #F5F8FD;
         border: none;
         padding: 6px 9px;
         font-size: 8.5pt;
