@@ -6,11 +6,12 @@ import sys
 from ctypes import wintypes
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from capture_hider import k32
 from paths import migrate_legacy_files, state_file
-from theme import apply as apply_theme
+from theme import apply as apply_theme, asset as theme_asset
 from ui import WindowHiderUI, CaptureSafeMessageBox
 
 MUTEX_NAME = "ShadowM.SingleInstance"
@@ -61,7 +62,11 @@ def _warn_box(text: str, informative: str = ""):
     """Startup warning that is itself excluded from screen capture."""
     box = CaptureSafeMessageBox()
     box.setWindowTitle("ShadowM")
-    box.setIcon(QMessageBox.Warning)
+    box.setIconPixmap(
+        QPixmap(theme_asset("logo.svg")).scaled(
+            36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+    )
     box.setText(text)
     if informative:
         box.setInformativeText(informative)
@@ -78,6 +83,7 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     apply_theme(app)  # also skins the startup dialogs shown before the UI
+    app.setWindowIcon(QIcon(theme_asset("shadowm.ico")))
 
     mutex = acquire_single_instance_mutex()
     if mutex is None:
